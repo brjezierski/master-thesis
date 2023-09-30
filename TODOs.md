@@ -1,11 +1,17 @@
 # Shared
+
+How to structure results:
+- compare different similarity training approaches (summarize what has been done in the notebook) - get a loss graph for the best
+- compare different classification training approaches 
+- compare combined training and one-after-another training (first classification, then similarity and the other way around) 
+- compare training with tags, /wo tags and original 
+- compare results on clustering from the best models (get many different metrics)
+
 To do:
+- use socomp GPUs
 - label the big dataset with company names
 - compare semi- and supervised 
-- ask about UI
-- figure out heuristics for removing Named Entities
 - figure out best loss for bayesian search
-
 - test the approach of two training methods one after another: first classification, then similarity
 - investigate other topic modelling models
 - associate right rows (within each topic)
@@ -40,6 +46,7 @@ Done:
   - for country and company labels
   - some interface?
   - usage: should it work for a specific topic not in the training data? current approach is that we have different topics and I train within these topics 
+- to finish the hyperparam search
 
 # Similarity training
 

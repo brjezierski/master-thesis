@@ -21,6 +21,8 @@ import nltk
 from sklearn.feature_extraction.text import CountVectorizer
 import pickle
 from octis.evaluation_metrics.diversity_metrics import TopicDiversity
+from bertopic.representation import KeyBERTInspired
+import hdbscan
 
 # def get_topics(row):
 #     cluster_id = row['cluster_id']
@@ -50,28 +52,62 @@ def remove_stopwords(sentence):
     return ' '.join(filtered_words)
 
 
-def get_bert_topics(df, clustering, snippets, params):
+def is_supervised_training(df, params):
+    return 'classification' in df.columns and len(params['INFERENCE_LABELS']) > 0
+
+
+def split_supervised_training_df(df, params):
+    if type(df['classification'].iloc[0]) == list:
+        inference_labels_for_list = [inference_label.split(
+            '|') for inference_label in params['INFERENCE_LABELS']]
+        training_df = df[~df['classification'].isin(inference_labels_for_list)]
+        inference_df = df[df['classification'].isin(inference_labels_for_list)]
+    else:
+        inference_labels_for_string = params['INFERENCE_LABELS']
+        training_df = df[~df['classification'].isin(
+            inference_labels_for_string)]
+        inference_df = df[df['classification'].isin(
+            inference_labels_for_string)]
+    return training_df, inference_df
+
+
+def get_bert_topics(df, params):
     umap_model = umap.UMAP(n_neighbors=params['n_neighbors'],
                            n_components=params['n_components'],
                            min_dist=0.0, metric='cosine',
                            random_state=42)
     vectorizer_model = CountVectorizer(
         stop_words="english", min_df=2, ngram_range=(1, 2))
+    representation_model = {"KeyBERT": KeyBERTInspired()}
+    clustering_model = hdbscan.HDBSCAN(min_cluster_size=params['min_cluster_size'],
+                                       min_samples=params[
+                                           'min_samples'] if 'min_samples' in params else 1,
+                                       metric='euclidean',
+                                       gen_min_span_tree=True,
+                                       cluster_selection_method='eom',
+                                       prediction_data=True)
+
     topic_model = BERTopic(embedding_model=SentenceTransformer(params['HF_MODEL_NAME']),
                            umap_model=umap_model,
-                           hdbscan_model=clustering,
+                           hdbscan_model=clustering_model,
                            vectorizer_model=vectorizer_model,
                            top_n_words=params['TOP_K_TOPICS'],
-                           verbose=True
-                           )  # , representation_model=representation_model)
+                           verbose=True,
+                           representation_model=representation_model)
 
-    if params['REMOVE_STOPWORDS']:
-        snippets = [remove_stopwords(snippet) for snippet in snippets]
+    if is_supervised_training(df, params):
+        training_df, inference_df = split_supervised_training_df(df, params)
+        training_snippets = training_df[params['SNIPPET_COLUMN_NAME']].tolist()
+        inference_snippets = inference_df[params['SNIPPET_COLUMN_NAME']].tolist(
+        )
 
-    if params['SEMI_SUPERVISED'] and 'classification' in df.columns:
-        df = collect_classification_labels(df)
-        df = get_top_values(df, params)
-        classes = df["top_classification"].to_list()
+        if params['REMOVE_STOPWORDS']:
+            inference_snippets = [remove_stopwords(
+                snippet) for snippet in inference_snippets]
+
+        training_df = collect_classification_labels(training_df)
+        training_df = get_top_values(training_df, params)
+        classes = training_df["top_classification"].to_list()
         labels_to_add = set(classes)
         label_to_int_mapping = {}
         counter = 1
@@ -79,33 +115,40 @@ def get_bert_topics(df, clustering, snippets, params):
             label_to_int_mapping[string] = counter
             counter += 1
 
-        new_labels = [label_to_int_mapping[classification]
-                      if classification else -1 for classification in classes]
-        topics, probs = topic_model.fit_transform(snippets, y=new_labels)
+        labels = [label_to_int_mapping[classification]
+                  if classification else -1 for classification in classes]
+        topic_model.fit(training_snippets, y=labels)
+        predictions, probabilities = topic_model.transform(inference_snippets)
+        data = {
+            'Document': inference_snippets,
+            'Topic': predictions,
+            'Probability': probabilities
+        }
+        document_info = pd.DataFrame(data)
+        output_df = inference_df
     else:
-        topics, probs = topic_model.fit_transform(snippets)
-
-    document_info = topic_model.get_document_info(snippets)
+        snippets = df[params['SNIPPET_COLUMN_NAME']].tolist()
+        if params['REMOVE_STOPWORDS']:
+            snippets = [remove_stopwords(
+                snippet) for snippet in snippets]
+        topic_model.fit_transform(snippets)
+        inference_snippets = snippets
+        output_df = df
+        document_info = topic_model.get_document_info(inference_snippets)
 
     topic_df = document_info.rename(
         columns={'Document': params['SNIPPET_COLUMN_NAME']})
-#     .drop(
-#         columns=['Representation', 'Representative_Docs', 'Top_n_words', 'Probability', 'Representative_document'])
 #     output_df = pd.merge(output_df, topic_df, on='snippet', how='left')
-    df = pd.merge(df, topic_df, left_index=True,
-                  right_index=True, how='left')
-    cluster_id_to_name_dict = document_info.set_index('Topic')[
+    output_df = pd.merge(output_df, topic_df, left_index=True,
+                         right_index=True, how='left')
+    cluster_id_to_name_dict = topic_model.get_topic_info().set_index('Topic')[
         'Representation'].to_dict()
     cluster_id_to_name_dict = {
-        k: cluster_id_to_name_dict[k] for k in sorted(cluster_id_to_name_dict)}
+        k: cluster_id_to_name_dict[k] for k in sorted(cluster_id_to_name_dict)
+    }
+    cluster_topics = [data for _, data in cluster_id_to_name_dict.items()]
 
-    cluster_topics = [data for cluster_name,
-                      data in cluster_id_to_name_dict.items()]
-
-    # cluster_topics = [data.split(
-    #     '_')[1:] for cluster_name, data in cluster_id_to_name_dict.items()]
-
-    return cluster_topics, df, topic_model
+    return cluster_topics, output_df, topic_model
 
 
 def get_chat_intents_topics(model, output_df):
@@ -374,9 +417,8 @@ def save_embeddings(model_name, input_file_path, output_file_path, snippet_colum
             df = create_replace_no_tags_embeddings(
                 df, replace_no_tags_embeddings)
             snippet_column = 'replace_no_tags'
-        if params['KEEP_ONLY_BAD_LABELS']:
-            bad_labels = ['OTHER|ENTITY', 'OTHER', 'ENTITY', 'ENTITY|OTHER']
-            df = df[df['classification'].isin(bad_labels)]
+        # if params['KEEP_ONLY_BAD_LABELS']:
+        #     df = df[df['classification'].isin(params["INFERENCE_LABELS"])]
         snippets = df[snippet_column].tolist()
         embeddings = model.encode(snippets)
         df['embedding'] = embeddings.tolist()

@@ -100,7 +100,7 @@ def get_news_df(params, dataset_name):
     return news_df
 
 
-def collect_classification_labels(df, verbose=True):
+def collect_classification_labels(df, verbose=False):
     if type(df['classification'].iloc[0]) == str:
         df['classification'] = df['classification'].str.split('|')
         replace_nan_with(df, ['classification'], [])
@@ -303,7 +303,7 @@ def triplets_from_labeled_dataset(input_examples, output_filename):
     return triplets
 
 
-def get_dataset(df, label_map, create_new_split, dataset_dir, val_dev_size=100):
+def get_dataset(df, params, label_map, create_new_split, dataset_dir, val_dev_size=100):
     guid = 1
     if create_new_split:
         train_df, dev_df, test_df = get_train_dev_test_split(
@@ -321,7 +321,7 @@ def get_dataset(df, label_map, create_new_split, dataset_dir, val_dev_size=100):
             if classification in label_map.keys():
                 label_id = label_map[classification]
                 examples.append(InputExample(guid=guid, texts=[
-                                row['snippet']], label=label_id))
+                                row[params['SNIPPET_COLUMN_NAME'] if 'SNIPPET_COLUMN_NAME' in params else 'snippet']], label=label_id))
                 guid += 1
         datasets.append(examples)
 
@@ -376,7 +376,7 @@ def prepare_for_training(classified_df, classifications, params, dataset_dir, sb
         freeze.freeze_except_last_layers(sbert_model, unfreeze_layers)
 
     train_set, dev_set, test_set = get_dataset(
-        classified_df, classifications, create_new_split, dataset_dir)
+        classified_df, params, classifications, create_new_split, dataset_dir, val_dev_size=params["VAL_DEV_SIZE"])
 
     print(f"e={num_epochs} Using " + ("original and replacement" if use_original_data and use_replace_data else "original" if use_original_data else "replacement") + " data" +
           (", creating a new train-dev-test split" if create_new_split else "") +
