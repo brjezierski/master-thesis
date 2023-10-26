@@ -57,16 +57,19 @@ def is_supervised_training(df, params):
 
 
 def split_supervised_training_df(df, params):
-    if type(df['classification'].iloc[0]) == list:
+    column_name = 'top_classification' if 'top_classification' in df.columns else 'classification'
+    if type(df[column_name].iloc[0]) == list:
         inference_labels_for_list = [inference_label.split(
             '|') for inference_label in params['INFERENCE_LABELS']]
-        training_df = df[~df['classification'].isin(inference_labels_for_list)]
-        inference_df = df[df['classification'].isin(inference_labels_for_list)]
+        training_df = df[~df[column_name].isin(
+            inference_labels_for_list)]
+        inference_df = df[df[column_name].isin(
+            inference_labels_for_list)]
     else:
         inference_labels_for_string = params['INFERENCE_LABELS']
-        training_df = df[~df['classification'].isin(
+        training_df = df[~df[column_name].isin(
             inference_labels_for_string)]
-        inference_df = df[df['classification'].isin(
+        inference_df = df[df[column_name].isin(
             inference_labels_for_string)]
     return training_df, inference_df
 
@@ -97,6 +100,7 @@ def get_bert_topics(df, params):
 
     if is_supervised_training(df, params):
         training_df, inference_df = split_supervised_training_df(df, params)
+        training_df, inference_df = training_df.reindex(), inference_df.reindex()
         training_snippets = training_df[params['SNIPPET_COLUMN_NAME']].tolist()
         inference_snippets = inference_df[params['SNIPPET_COLUMN_NAME']].tolist(
         )
@@ -117,14 +121,18 @@ def get_bert_topics(df, params):
 
         labels = [label_to_int_mapping[classification]
                   if classification else -1 for classification in classes]
+        print(f'Fitting the BERT model on {len(training_snippets)} snippets')
         topic_model.fit(training_snippets, y=labels)
+        # TODO pass embeddings
+        print(f'BERT model labelling {len(inference_snippets)} snippets')
+        print('inference_snippets', len(inference_snippets))
         predictions, probabilities = topic_model.transform(inference_snippets)
         data = {
             'Document': inference_snippets,
             'Topic': predictions,
             'Probability': probabilities
         }
-        document_info = pd.DataFrame(data)
+        topic_df = pd.DataFrame(data)
         output_df = inference_df
     else:
         snippets = df[params['SNIPPET_COLUMN_NAME']].tolist()
@@ -134,11 +142,21 @@ def get_bert_topics(df, params):
         topic_model.fit_transform(snippets)
         inference_snippets = snippets
         output_df = df
-        document_info = topic_model.get_document_info(inference_snippets)
+        topic_df = topic_model.get_document_info(inference_snippets)
 
-    topic_df = document_info.rename(
-        columns={'Document': params['SNIPPET_COLUMN_NAME']})
-#     output_df = pd.merge(output_df, topic_df, on='snippet', how='left')
+    # topic_df = document_info.rename(
+    #     columns={'Document': params['SNIPPET_COLUMN_NAME']})
+    topic_df.drop(columns=['Document'], inplace=True)
+    topic_df.reset_index(drop=True, inplace=True)
+    if "temp_" + params['SNIPPET_COLUMN_NAME'] in output_df.columns:
+        output_df.drop(columns=["temp_" + params['SNIPPET_COLUMN_NAME']],
+                       inplace=True)
+    output_df.reset_index(drop=True, inplace=True)
+    if len(output_df) != len(topic_df):
+        print('BERTopic modeling: output_df and topic_df have different lengths:', len(
+            output_df), len(topic_df))
+    # output_df = pd.merge(output_df, topic_df,
+    #                      left_on="temp_" + params['SNIPPET_COLUMN_NAME'], right_on=params['SNIPPET_COLUMN_NAME'], how='left')
     output_df = pd.merge(output_df, topic_df, left_index=True,
                          right_index=True, how='left')
     cluster_id_to_name_dict = topic_model.get_topic_info().set_index('Topic')[
@@ -147,7 +165,7 @@ def get_bert_topics(df, params):
         k: cluster_id_to_name_dict[k] for k in sorted(cluster_id_to_name_dict)
     }
     cluster_topics = [data for _, data in cluster_id_to_name_dict.items()]
-
+    output_df['cluster_id'] = output_df['Topic']
     return cluster_topics, output_df, topic_model
 
 
@@ -155,20 +173,25 @@ def get_chat_intents_topics(model, output_df):
     cluster_topics = []
     for cluster_name, group_df in output_df.groupby('cluster_id'):
         #       data = group_df[['id', 'tooltip', 'x', 'y']].to_dict('records')
-        topic = model._extract_labels(group_df['snippet'].tolist())
+        snippets = group_df['snippet'].tolist()
+        # if "REMOVE_STOPWORDS" in params and params["REMOVE_STOPWORDS"]:
+        #     snippets = [remove_stopwords(snippet) for snippet in snippets]
+        #     for snippet in snippets:
+        #         if '%' in snippet:
+        #             print(snippet)
+        topic = model._extract_labels(snippets)
         topic_list = topic.split('_')
         cluster_topics.append(topic_list)
     return cluster_topics
 
-
 # Import the tsv consulting file to get all the companies
 
 
-def get_most_common_company(cluster_id_to_ids_map, cluster_id, input_file='../glanos-data/clustering/big_consulting_export.tsv'):
+def get_most_common_company(df, cluster_id_to_ids_map, cluster_id, input_file='../glanos-data/clustering/big_consulting_export.tsv'):
     # Find the company with the most counts and its count
-    big_consulting_export = pd.read_csv(input_file, sep='\t')
+    # big_consulting_export = pd.read_csv(input_file, sep='\t')
     id_to_company_map = dict(
-        zip(big_consulting_export['id'], big_consulting_export['company']))
+        zip(df['id'], df['company']))
 
     ids = cluster_id_to_ids_map[cluster_id]
     company_counts = {}
@@ -181,15 +204,18 @@ def get_most_common_company(cluster_id_to_ids_map, cluster_id, input_file='../gl
 
     max_company_count = 0
     max_company_name = None
+    second_max_company_name = None
     cluster_size = 0
     for company, count in company_counts.items():
         cluster_size += count
         if count > max_company_count:
             max_company_count = count
+            second_max_company_name = max_company_name
             max_company_name = company
 
     max_company_occurence = "%.2f" % ((max_company_count / cluster_size) * 100)
-#     print(f"Cluster {cluster_id}: top company {max_company_name} at {max_company_occurence}%")
+    # print(
+    #     f"Cluster {cluster_id}: top company {max_company_name} at {max_company_occurence}%")
     return cluster_size, (max_company_count / cluster_size) * 100
 
 
@@ -206,7 +232,8 @@ def get_overlap_loss(df, topics_list, label_count, verbose=False):
                     continue  # Skip self-comparison
                 common_elements = set(lst1) & set(lst2)
                 if len(common_elements) >= 1:
-                    overlap_count[len(common_elements) - 1] += 1
+                    overlap_count[len(common_elements) - 1 if len(common_elements)
+                                  <= len(overlap_count) else len(overlap_count) - 1] += 1
                     overlaps[(i, j)] = len(common_elements)
 
     overlap_count = [int(x / 2) for x in overlap_count]
@@ -221,7 +248,10 @@ def get_overlap_loss(df, topics_list, label_count, verbose=False):
         elif index + 1 == 4:
             loss += count * 8
         if verbose:
-            print(f"Overlap count of length {index+1}: {count}")
+            if index + 1 == 4:
+                print(f"Overlap count of length {index+1} or more: {count}")
+            else:
+                print(f"Overlap count of length {index+1}: {count}")
 
     loss /= label_count
     return loss
@@ -321,7 +351,7 @@ def get_clustering_metrics(df, topics_list, params, verbose=True, input_file='..
     for i, lst1 in enumerate(topics_list):
         if i - 1 in cluster_id_to_ids_map.keys():
             cluster_size, top_company_occurence = get_most_common_company(
-                cluster_id_to_ids_map, i - 1, input_file=input_file)
+                df, cluster_id_to_ids_map, i - 1, input_file=input_file)
             cluster_sizes.append(cluster_size)
             top_company_occurences.append(top_company_occurence)
 
@@ -359,7 +389,7 @@ def plot_best_clusters(model, df, labels, params, filename="", n_neighbors=15, m
                              min_dist=min_dist,
                              # metric='cosine',
                              random_state=42)
-                   .fit_transform(model.message_embeddings)
+                   .fit_transform(model.inference_embeddings)
                    )
 
     result = pd.DataFrame(umap_reduce, columns=['x', 'y'])
@@ -397,17 +427,20 @@ def save_embeddings(model_name, input_file_path, output_file_path, snippet_colum
     else:
         model = load_model(model=model_name)
 
-    if not 'replace' in input_file_path:
-        with open(input_file_path, 'r') as f:
-            data = json.load(f)
+    if not 'replace' in snippet_column:
+        if "json" in input_file_path:
+            with open(input_file_path, 'r') as f:
+                data = json.load(f)
 
-        if 'items' in data:
-            df = pd.json_normalize(data['items'])
-            df = df.dropna()
-            snippets = df[snippet_column].tolist()
-            model = load_model(model_name)
-            embeddings = model.encode(snippets)
-            df['embedding'] = embeddings.tolist()
+            if 'items' in data:
+                df = pd.json_normalize(data['items'])
+        else:
+            df = pd.read_csv(input_file_path, sep='\t')
+        df = df.dropna()
+        snippets = df[snippet_column].tolist()
+        model = load_model(model_name)
+        embeddings = model.encode(snippets)
+        df['embedding'] = embeddings.tolist()
     else:
         df = pd.read_csv(input_file_path, sep='\t')
         if snippet_column == "replace_no_tags":
