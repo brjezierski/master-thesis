@@ -240,13 +240,15 @@ def get_overlap_loss(df, topics_list, label_count, verbose=False):
     loss = 0
     for index, count in enumerate(overlap_count):
         if index + 1 == 1:
-            loss += count / 4
+            # overlap_count = index + 1
+            # loss += count * 4^(overlap_count - 2)
+            loss += count / 4  # 4^-1
         elif index + 1 == 2:
-            loss += count
+            loss += count  # 4^0
         elif index + 1 == 3:
-            loss += count * 4
+            loss += count * 4  # 4^1
         elif index + 1 == 4:
-            loss += count * 8
+            loss += count * 8  # 2^2
         if verbose:
             if index + 1 == 4:
                 print(f"Overlap count of length {index+1} or more: {count}")
@@ -355,17 +357,21 @@ def get_clustering_metrics(df, topics_list, params, verbose=True, input_file='..
             cluster_sizes.append(cluster_size)
             top_company_occurences.append(top_company_occurence)
 
-    overlap_loss = get_overlap_loss(
-        df, topics_list, params['label_count'], verbose=verbose)
-    diversity_loss = get_diversity_loss(topics_list, params)
+    if topics_list:
+        overlap_loss = get_overlap_loss(
+            df, topics_list, params['label_count'], verbose=verbose)
+        diversity_loss = get_diversity_loss(topics_list, params)
+        if verbose:
+            print("Overlap loss: ", ("%.2f" % overlap_loss))
+            print("Diversity loss: ", ("%.2f" % diversity_loss))
 
+    avg_cluster_size = np.average(cluster_sizes)
     median_cluster_size = np.median(cluster_sizes)
     std_deviation_cluster_size = np.std(cluster_sizes)
     median_top_company_occurence = np.median(top_company_occurences)
     if verbose:
-        print("Overlap loss: ", ("%.2f" % overlap_loss))
-        print("Diversity loss: ", ("%.2f" % diversity_loss))
         print(f"Number of clusters: {params['label_count']}")
+        print(f"Avg cluster size:", avg_cluster_size)
         print(f"Median cluster size:", median_cluster_size,
               ", standard deviation:", std_deviation_cluster_size)
         print(f"Median top company occurence:", median_top_company_occurence)

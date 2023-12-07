@@ -25,7 +25,7 @@ def get_big_consulting_df(params):
     replace_data_path = '../glanos-data/datasets/big_consulting_export_replace.tsv'
     original_data_path = '../glanos-data/embeddings/big_consulting_export_replace_with_embeddings.pkl'
 
-    if params["USE_ORIGINAL_DATA"] and params["USE_REPLACE_DATA"] and os.path.exists(replace_data_path):
+    if "consulting" in params["DATASETS"] and "consulting2" in params["DATASETS"] and os.path.exists(replace_data_path):
         big_consulting_df = load_big_consulting_export()
         with open(original_data_path, 'rb') as f:
             big_consulting_df_r = pickle.load(f)
@@ -33,10 +33,10 @@ def get_big_consulting_df(params):
             [big_consulting_df, big_consulting_df_r], axis=0).reset_index(drop=True)
         big_consulting_df.drop_duplicates(
             subset='snippet', keep='first', inplace=True)
-    elif params["USE_ORIGINAL_DATA"]:
+    elif "consulting" in params["DATASETS"]:
         # pd.read_pickle('big_consulting_export-df.pkl')
         big_consulting_df = load_big_consulting_export()
-    elif params["USE_REPLACE_DATA"]:
+    elif "consulting2" in params["DATASETS"]:
         if os.path.exists(replace_data_path):
             with open(original_data_path, 'rb') as f:
                 big_consulting_df = pickle.load(f)
@@ -68,14 +68,7 @@ def get_news_df(params, dataset_name):
         return sbert_model.encode(snippet)
 
     news_df = load_ai_news() if dataset_name == 'ai_news' else load_car_news()
-    if params["USE_ORIGINAL_DATA"] and params["USE_REPLACE_DATA"] and os.path.exists(replace_data_path):
-        print("Not supported")
-        return None
-        # with open(original_data_path, 'rb') as f:
-        #     news_df_r = pickle.load(f)
-        # news_df = pd.concat(
-        #     [news_df, news_df_r], axis=0).reset_index(drop=True)
-    elif params["USE_ORIGINAL_DATA"]:
+    if params['SNIPPET_COLUMN_NAME'] == 'snippet':
         if os.path.exists(original_data_path):
             with open(original_data_path, 'rb') as f:
                 original_dict = pickle.load(f)
@@ -83,7 +76,7 @@ def get_news_df(params, dataset_name):
         else:
             news_df['embedding'] = news_df.progress_apply(
                 lambda row: encode_w_sbert(row['snippet']), axis=1)
-    elif params["USE_REPLACE_DATA"]:
+    elif 'replace' in params['SNIPPET_COLUMN_NAME']:
         if os.path.exists(replace_data_path):
             with open(replace_data_path, 'rb') as f:
                 replace_dict = pickle.load(f)
@@ -96,7 +89,7 @@ def get_news_df(params, dataset_name):
         return None
 
     news_df.dropna(subset=['embedding'], inplace=True)
-    news_df['id'] = dataset_name + news_df.index.astype(str)
+    # news_df['id'] = dataset_name + news_df.index.astype(str)
     return news_df
 
 
@@ -120,7 +113,10 @@ def calculate_cosine_similarity(embedding1, embedding2):
 
 
 def get_top_values(df, params, column='classification'):
-    sbert_model = load_model()
+    model = load_model(params['HF_MODEL_NAME'] if 'HF_MODEL_NAME' in params else (
+        params["INITIALIZED_MODEL"] if "INITIALIZED_MODEL" in params else 'sentence-transformers/all-MiniLM-L12-v2'))
+    if "INITIALIZED_MODEL" in params and params["INITIALIZED_MODEL"] == "all-mpnet-base-v2":
+        model = load_model('sentence-transformers/all-MiniLM-L12-v2')
     # Iterate over the rows of the DataFrame
     for index, row in df.iterrows():
         value = row[column]
@@ -136,7 +132,7 @@ def get_top_values(df, params, column='classification'):
             continue
 
         # Calculate SBERT embeddings for each element
-        embeddings = sbert_model.encode(value)
+        embeddings = model.encode(value)
 
         # Find the element with the highest cosine similarity to the snippet embedding
         max_similarity = -1
@@ -173,7 +169,7 @@ def get_joint_classification(df):
     return df
 
 
-def get_relevant_classifications(df, params, verbose=True):
+def get_relevant_classifications(df, params, verbose=False):
 
     def get_value_count(df, col):
         counts = df[col].explode().value_counts()
@@ -203,7 +199,8 @@ def get_relevant_classifications(df, params, verbose=True):
     all_classifications = []
     for i, v in top_classification_counts.items():
         if i != "":
-            print(i, v)
+            if verbose:
+                print(i, v)
             all_classifications.append(i)
             if "OCCURENCE_CUTOFF" in params and v < params["OCCURENCE_CUTOFF"]:
                 continue
@@ -221,7 +218,7 @@ def filter_relevant_classifications(df, all_classifications, relevant_classifica
         classifications[r_c] = i
         i += 1
 
-    df.reset_index(inplace=True)
+    df.reset_index(drop=True, inplace=True)
     if 'id' not in df.columns:
         df['id'] = df.index
     return df, classifications
@@ -254,7 +251,7 @@ def get_train_dev_test_split(df, dataset_dir, val_dev_size=100):
     test_df, train_df = get_paired_dataset(train_df, size=val_dev_size)
     if not os.path.exists(dataset_dir):
         os.makedirs(dataset_dir)
-    train_df.to_csv(f'{dataset_dir}train.tsv', sep='\t')
+    # train_df.to_csv(f'{dataset_dir}train.tsv', sep='\t')
     dev_df.to_csv(f'{dataset_dir}dev.tsv', sep='\t')
     test_df.to_csv(f'{dataset_dir}test.tsv', sep='\t')
 
@@ -311,8 +308,17 @@ def get_dataset(df, params, label_map, create_new_split, dataset_dir, val_dev_si
     else:
         train_df, dev_df, test_df = read_train_dev_test_files(
             df, dataset_dir)
-    datasets = []
+    if "NEW_CLASSIFICATIONS_FILE" in params and "joint" in params["NEW_CLASSIFICATIONS_FILE"]:
+        with open(params["NEW_CLASSIFICATIONS_FILE"]["joint"], 'rb') as file:
+            new_classifications_dict = pickle.load(file)
+        train_df['top_classification'] = train_df['snippet'].map(
+            new_classifications_dict)
+        dev_df['top_classification'] = dev_df['snippet'].map(
+            new_classifications_dict)
+        test_df['top_classification'] = test_df['snippet'].map(
+            new_classifications_dict)
 
+    datasets = []
     for dataset in [train_df, dev_df, test_df]:
         examples = []
         for index, row in dataset.iterrows():
@@ -327,15 +333,17 @@ def get_dataset(df, params, label_map, create_new_split, dataset_dir, val_dev_si
 
     random.seed(42)
     dev_set_path = f'{dataset_dir}dev_triplets.pkl'
-    if not os.path.exists(dev_set_path):
+    if not os.path.exists(dev_set_path) or create_new_split:
+        print("Creating new dev and test triplets")
         dev_triplets = triplets_from_labeled_dataset(
             datasets[1], dev_set_path)
     else:
+        print("Reading existing dev and test triplets")
         with open(dev_set_path, 'rb') as f:
             dev_triplets = pickle.load(f)
 
     test_set_path = f'{dataset_dir}test_triplets.pkl'
-    if not os.path.exists(test_set_path):
+    if not os.path.exists(test_set_path) or create_new_split:
         test_triplets = triplets_from_labeled_dataset(
             datasets[2], test_set_path)
     else:
@@ -364,27 +372,30 @@ def prepare_for_training(classified_df, classifications, params, dataset_dir, sb
     all sentences with the same label should be close and sentences for different labels should be clearly seperated.
     """
     num_epochs = params["EPOCHS"]
-    use_replace_data = params["USE_REPLACE_DATA"]
-    use_original_data = params["USE_ORIGINAL_DATA"]
     unfreeze_layers = params["UNFREEZE_LAYERS"]
     exclude_entity_other = params["EXCLUDE_ENTITY_OTHER"]
     initialized_model = params["INITIALIZED_MODEL"]
     occurence_cutoff = params["OCCURENCE_CUTOFF"]
     create_new_split = params["CREATE_NEW_SPLIT"]
+    snippet_column_name = params["SNIPPET_COLUMN_NAME"]
+    loss = params["LOSS"] if "LOSS" in params else "BatchAllTripletLoss"
 
     if unfreeze_layers:
         freeze.freeze_except_last_layers(sbert_model, unfreeze_layers)
+    else:
+        freeze.freeze_all_layers(sbert_model)
 
     train_set, dev_set, test_set = get_dataset(
         classified_df, params, classifications, create_new_split, dataset_dir, val_dev_size=params["VAL_DEV_SIZE"])
 
-    print(f"e={num_epochs} Using " + ("original and replacement" if use_original_data and use_replace_data else "original" if use_original_data else "replacement") + " data" +
+    print(f"e={num_epochs}" +
+          (f", embeddings from {snippet_column_name}") +
           (", creating a new train-dev-test split" if create_new_split else "") +
           (f", unfreezing {unfreeze_layers} last layers" if unfreeze_layers else "") +
           (", excluding Entity and Other labels" if exclude_entity_other else "") +
           (f", starting with {initialized_model}" if initialized_model else "") +
           (f", only including words that occur at least {occurence_cutoff} times" if occurence_cutoff > 0 else "") +
-          ", training data size" + str(len(train_set)) +
+          ", training data size " + str(len(train_set)) +
           "\n"
           )
     print('Training data size', len(train_set))
@@ -400,7 +411,12 @@ def prepare_for_training(classified_df, classifications, params, dataset_dir, sb
     dev_evaluator = TripletEvaluator.from_input_examples(
         dev_set, name='Glanos')
 
-    loss = losses.BatchAllTripletLoss(model=sbert_model)
+    if loss == "BatchAllTripletLoss":
+        loss = losses.BatchAllTripletLoss(model=sbert_model)
+    elif loss == "BatchHardTripletLoss":
+        loss = losses.BatchHardTripletLoss(model=sbert_model)
+    else:
+        loss = losses.BatchAllTripletLoss(model=sbert_model)
 
     test_evaluator = TripletEvaluator.from_input_examples(
         test_set, name='Glanos')
@@ -457,3 +473,25 @@ def train(classified_df, classifications, params, dataset_dir, sbert_model, save
         callback=callback
     )
     return model_fit, test_evaluator, sbert_model
+
+
+def get_train_objectives(classified_df, classifications, params, dataset_dir, sbert_model, save_model=False):
+    if type(classified_df) == list and len(classified_df) == len(classifications):
+        print('Training with multiple objectives')
+        steps_per_epoch = min([len(df)
+                              for df in classified_df]) / params["BATCH_SIZE"]
+        train_objectives = []
+        for sub_classified_df, sub_classifications in zip(classified_df, classifications):
+            train_objective, dev_evaluator, test_evaluator = prepare_for_training(
+                sub_classified_df, sub_classifications, params, dataset_dir, sbert_model)
+            train_objectives.extend(train_objective)
+    else:
+        print('Training with one objective')
+        steps_per_epoch = len(classified_df) / params["BATCH_SIZE"]
+        train_objectives, dev_evaluator, test_evaluator = prepare_for_training(
+            classified_df, classifications, params, dataset_dir, sbert_model)
+
+    print("Performance before fine-tuning:")
+    dev_evaluator(sbert_model)
+
+    return train_objectives, dev_evaluator, test_evaluator, steps_per_epoch, sbert_model
