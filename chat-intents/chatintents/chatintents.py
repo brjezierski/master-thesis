@@ -208,6 +208,7 @@ class ChatIntents:
                 self.inference_df['cluster_id'] = clusters.labels_
                 cluster_topics = get_chat_intents_topics(
                     self, self.inference_df)
+                df = self.inference_df
             elif topic_model == "bert":
                 cluster_topics, df, topic_model = get_bert_topics(
                     df, params)
@@ -222,7 +223,7 @@ class ChatIntents:
 
             if metric.startswith('topic_overlap'):
                 loss = get_overlap_loss(
-                    self.inference_df, cluster_topics, label_count)
+                    df, cluster_topics, label_count)
             elif metric.startswith('topic_diversity'):
                 loss = get_diversity_loss(cluster_topics, params)
 

@@ -3,9 +3,11 @@ def freeze_all_layers(model):
         param.requires_grad = False
     return None
 
+
 def freeze_except_last_layers(model, n=2):
-    
-    layernames = list([name for name, _ in model.named_parameters() if "layer." in name])
+
+    layernames = list(
+        [name for name, _ in model.named_parameters() if "layer." in name])
     layerids = [name.split("layer.")[1].split(".")[0] for name in layernames]
     layerids = set([int(lid) for lid in layerids])
     layerids = sorted(list(layerids))
@@ -20,5 +22,5 @@ def freeze_except_last_layers(model, n=2):
             continue
         else:
             param.requires_grad = False
-    
+
     return None
