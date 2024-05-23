@@ -1,0 +1,45 @@
+name: tm
+channels:
+  - conda-forge
+dependencies:
+  - nltk
+  - scikit-learn
+  - tokenizers
+  - tensorboard
+  - spacy
+  - python=3.9
+  - transformers
+  - future==0.18.2
+  - pandas
+  - sentencepiece
+  - fire=0.2.1
+  - jupyter
+  - plotly
+  - umap-learn
+  - hdbscan
+  - matplotlib
+  - tensorflow
+  - hyperopt
+  - tensorflow-hub
+  - sklearn-crfsuite #==0.3.6
+  - pytorch-lightning
+  - lightning
+  - pip
+  - pip:
+    - accelerate
+    - bertopic
+    - dash
+    - dash-bootstrap-components
+    - dash-core-components
+    - dash-html-components
+    - dash-table
+    - dash-table-experiments
+    - numpy #==1.23.5
+    - sacremoses
+    - sentence-transformers
+    - simpletransformers
+    - gensim
+    - pycountry
+    - flask_caching
+    # - octis
+prefix: /Users/bartekjezierski/miniforge3/envs/tm
