@@ -278,7 +278,8 @@ class GlanosBERTopic(BERTopic):
                     n_neighbors=15, 
                     n_components=2, 
                     min_dist=0.0, 
-                    metric='cosine'
+                    metric='cosine',
+                    random_state=42
                 ).fit_transform(self.get_embeddings(), y=self.topics_)
         if verbose:
             print("Dim reduction to 2D:", time.time()-tic)
@@ -297,3 +298,4 @@ class GlanosBERTopic(BERTopic):
             self.topics_ = self.reduce_outliers(self.get_formatted_documents(), self.topics_)
         self.update_topics()
         self.topic_labels_ = old_topic_labels
+ 

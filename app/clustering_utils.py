@@ -1,4 +1,4 @@
-from octis import TopicDiversity
+from metrics import TopicDiversity
 import nltk
 from nltk.corpus import stopwords
 import numpy as np

@@ -42,4 +42,4 @@ dependencies:
     - pycountry
     - flask_caching
     # - octis
-prefix: /Users/bartekjezierski/miniforge3/envs/tm
+prefix: /Users/bartek/miniforge3/envs/tm

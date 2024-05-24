@@ -3,7 +3,6 @@ import io
 import itertools
 import pickle
 from GlanosBERTopic import GlanosBERTopic
-from bertopic import BERTopic
 from chatintents import ChatIntents, get_hyperparameter_string
 import dash_bootstrap_components as dbc
 from dash import ctx, ALL
@@ -23,6 +22,9 @@ import sys
 from flask_caching import Cache
 
 from tqdm.notebook import tqdm
+from typing import Dict, Sequence, Tuple
+import random
+
 tqdm.pandas()
 sys.path.append('chat-intents/chatintents')
 
@@ -36,11 +38,11 @@ TOPIC_MODEL_DIR = 'topic_models'
 
 DEFAULT_TOPIC_MODEL = ''
 DEFAULT_EMBEDDING_MODEL = 'all-MiniLM-L12-v2'
-DEFAULT_MIN_CLUSTER_SIZE = 38
-DEFAULT_MIN_SAMPLES = 3
-DEFAULT_N_COMPONENTS = 5
-DEFAULT_N_NEIGHBORS = 51
-DEFAULT_TOP_N_TOPIC_WORDS = 10
+DEFAULT_MIN_CLUSTER_SIZE = 7 #38
+DEFAULT_MIN_SAMPLES = 4
+DEFAULT_N_COMPONENTS = 2
+DEFAULT_N_NEIGHBORS = 4 # 51
+DEFAULT_TOP_N_TOPIC_WORDS = 5 # 10
 
 # 'remove_named_entity_tags', 'replace_hashtag_in_named_entities'
 DEFAULT_SNIPPET_PROCESSING_STRATEGY = 'replace_hashtag_in_named_entities'
@@ -53,7 +55,7 @@ params = {
     "epochs": 1,
     "unfreeze_layers": 2,
     "batch_size": 32,
-    "val_dev_size": 100
+    "val_dev_size": 10
 }
 
 app = dash.Dash(external_stylesheets=[
@@ -71,10 +73,9 @@ def train_classification_model(pre_trained_model, df, classifications, params):
     '''
     Train the sentence embedding model using classification labels as classes to create triplets for training
     '''
-    params["WARMUP_STEPS"] = int(len(df) * params["epochs"] * 0.1)
     training_datasets = [df]
     classification_lists = [classifications]
-    model_fit, test_evaluator, model = train(
+    test_evaluator, model = train(
         training_datasets, classification_lists, params, pre_trained_model)
     # print('Score', model.evaluate(test_evaluator))
 
@@ -84,7 +85,7 @@ def train_classification_model(pre_trained_model, df, classifications, params):
     return model
 
 
-def get_data(selected_labels, classifications, snippet_processing_strategy, train_embeddings=False):
+def get_data(selected_labels: Sequence[str], classifications, snippet_processing_strategy, train_embeddings: bool=False):
     '''
     Modify the snipptes according to the selected processing strategy, train the sentence embedding model if needed, encode the snippets, and split into inference and training sets
     '''
@@ -144,7 +145,7 @@ def get_data(selected_labels, classifications, snippet_processing_strategy, trai
     return df_training, df_inference
 
 
-def run_bayesian_search(df_training, df_inference, is_topic_model_training, params, min_cluster_size_range, min_samples_range, n_components_range, n_neighbors_range):
+def run_bayesian_search(df_training, df_inference, is_topic_model_training: bool, params, min_cluster_size_range, min_samples_range, n_components_range, n_neighbors_range):
     '''
     Run the Bayesian search for the best hyperparameters
     '''
@@ -166,14 +167,14 @@ def run_bayesian_search(df_training, df_inference, is_topic_model_training, para
     return best_params, chat_intents_model.bayesian_search_results
 
 
-def create_and_train_topic_model(embedding_model, topic_model, topic_model_name, df_training, df_inference, params, reduce_outliers, is_topic_model_training):
+def create_and_train_topic_model(embedding_model, topic_model, topic_model_name: str, df_training, df_inference, params, reduce_outliers, is_topic_model_training: bool):
     '''
     Create a new topic model or load an existing one and train it
     '''
-    if topic_model_name.strip() == DEFAULT_TOPIC_MODEL: # if no model selected
+    if not topic_model_name or topic_model_name.strip() == DEFAULT_TOPIC_MODEL: # if no model selected
         topic_model = GlanosBERTopic(params, df_training, df_inference, topic_model_name, embedding_model)
     else:
-        topic_model = BERTopic.load(f'{OUTPUT_DIR}/{TOPIC_MODEL_DIR}/{topic_model_name}')
+        topic_model = GlanosBERTopic.load(f'{OUTPUT_DIR}/{TOPIC_MODEL_DIR}/{topic_model_name}')
         topic_model.df_training = df_training
         topic_model.df_inference = df_inference
         topic_model.topic_model_name = topic_model_name
@@ -193,7 +194,7 @@ def create_and_train_topic_model(embedding_model, topic_model, topic_model_name,
     Input('label-dropdown', 'value'),
     Input('topic-merge-dropdown', 'value')
 )
-def enable_run_button(selected_labels, selected_clusters):
+def enable_run_button(selected_labels: Sequence[str], selected_clusters) -> bool:
     '''
     Enable the "Run" button if inference is not empty and either no clusters selected to merge or more than two
     '''
@@ -236,7 +237,7 @@ def assign_selected_models(embedding_model_value, topic_model_value, snippet_pro
     cache.set('topic_model_name', topic_model_name)
 
     # Read from huggingface
-    if DEFAULT_EMBEDDING_MODEL in embedding_model_value:
+    if not embedding_model_value or DEFAULT_EMBEDDING_MODEL in embedding_model_value:
         embedding_model = GlanosSentenceTransformer(DEFAULT_EMBEDDING_MODEL)
     # Read locally with a path
     else:
@@ -277,11 +278,11 @@ def get_all_model_options(dir):
     else:
         return []
 
-def save_state(app_layout, figure, to_cache=True):
+def save_state(app_layout, figure, to_cache: bool=True) -> None:
     '''
     Save the current state of the app to the cache. Currently not necessary since the state gets updated with every change
     '''
-    def set_figure_at_id(d, target_id, fig):
+    def set_figure_at_id(d, target_id, fig) -> None:
         """
         Recursively set the 'figure' property at the specified 'id' in a nested dictionary.
 
@@ -320,6 +321,7 @@ def save_state(app_layout, figure, to_cache=True):
 )
 def save_load_state_callback(save_state_n_clicks, load_state_n_clicks, app_layout, fig):
     if ctx.triggered_id == 'save-state-btn':
+        print('save-state-btn save state')
         save_state(app_layout, fig)
         return True, 'State saved.', app_layout
     elif ctx.triggered_id == 'load-state-btn':
@@ -370,18 +372,19 @@ def enable_training_divs(embedding_model_n_clicks, topic_model_n_clicks):
     State('app-layout-div', 'children'),
     prevent_initial_call=True
 )
-def run_button_click(n_clicks, is_cluster_dialog_open, selected_labels, 
-                 classification_labels, embedding_training_checklist, topic_model_training_checklist, reduce_outliers, param_search,
+def run_button_click(n_clicks: int, is_cluster_dialog_open: bool, selected_labels: Sequence[str], 
+                 classification_labels: Sequence[str], embedding_training_checklist, topic_model_training_checklist, reduce_outliers, param_search,
                  min_cluster_size_value, min_samples_value, n_components_value, n_neighbors_value, top_n_topic_words_value,
-                 min_cluster_size_range, min_samples_range, n_components_range, n_neighbors_range, bayesian_iterations, hyperparam_string,
+                 min_cluster_size_range, min_samples_range, n_components_range, n_neighbors_range, bayesian_iterations, hyperparam_string: str,
                  fig, first_run_flag, snippet_processing_strategy, app_layout):
+    global params
+    random.seed(42)
     embedding_model = cache.get('embedding_model')
     topic_model = cache.get('topic_model')
     topic_model_name = cache.get('topic_model_name')
     df = cache.get('df')
 
     if ctx.triggered_id == 'label-dropdown':
-        save_state(app_layout, fig)
         return fig, hyperparam_string, True
 
     classifications = {classification_label['value']: i for i, classification_label in enumerate(classification_labels)}
@@ -406,11 +409,12 @@ def run_button_click(n_clicks, is_cluster_dialog_open, selected_labels,
                     train_embeddings='embedding_training' in embedding_training_checklist)
         if param_search:
             params["max_evals"] = bayesian_iterations
+            params = {**params, **{'topic_model_name': topic_model_name, 'embedding_model': embedding_model, 'top_n_topic_words': top_n_topic_words_value, 'is_topic_model_training': is_topic_model_training}}
             hdbscan_umap_params, bayesian_search_results = run_bayesian_search(
                     df_training,
                     df_inference,
                     is_topic_model_training, 
-                    {**params, **{'topic_model_name': topic_model_name, 'embedding_model': embedding_model, 'top_n_topic_words': top_n_topic_words_value, 'is_topic_model_training': is_topic_model_training}},
+                    params,
                     min_cluster_size_range, 
                     min_samples_range, 
                     n_components_range, 
@@ -428,7 +432,8 @@ def run_button_click(n_clicks, is_cluster_dialog_open, selected_labels,
                 "min_samples": min_samples_value,
                 "n_components": n_components_value,
                 "n_neighbors": n_neighbors_value,
-                "top_n_topic_words": top_n_topic_words_value}
+                "top_n_topic_words": top_n_topic_words_value
+                }
             hyperparameters_display_list = [
                 html.Div(f"Hyperparameters: {get_hyperparameter_string(hdbscan_umap_params)}"), 
                 html.Br()
@@ -461,7 +466,7 @@ def run_button_click(n_clicks, is_cluster_dialog_open, selected_labels,
     Input('recalculate-cluster-info-btn', 'n_clicks'),
     prevent_initial_call=True
     )
-def show_cluster_dialog(cluster_managment_n_clicks, is_open, add_new_cluster_n_clicks, snippets_modal_add_new_cluster_n_clicks, recalculate_cluster_info_n_clicks):
+def show_cluster_dialog(cluster_managment_n_clicks, is_open: bool, add_new_cluster_n_clicks, snippets_modal_add_new_cluster_n_clicks, recalculate_cluster_info_n_clicks):
     topic_model = cache.get('topic_model')
 
     topic_model.recalculate_topic_sizes()
@@ -524,7 +529,7 @@ def show_cluster_dialog(cluster_managment_n_clicks, is_open, add_new_cluster_n_c
     return True, topic_details, is_confirmation_displayed, f'New topic {new_topic_label} was just added.'
 
 
-def save_output(filename, is_embedding_included, last_opened_save_modal, snippet_processing_strategy):
+def save_output(filename, is_embedding_included: bool, last_opened_save_modal, snippet_processing_strategy) -> None:
     topic_model = cache.get('topic_model')
     embedding_model = cache.get('embedding_model')
 
@@ -618,7 +623,7 @@ def handle_saving_modal(save_file_clicks, save_embedding_model_clicks, save_topi
     Input({"type": "topic-name", "index": ALL}, "value"),
     State({"type": "topic-name", "index": ALL}, "id"),
 )
-def update_cluster_names(topic_names, topic_ids):
+def update_cluster_names(topic_names: Sequence[str], topic_ids):
     topic_model = cache.get('topic_model')
 
     if ctx.triggered_id and 'index' in ctx.triggered_id:
@@ -666,7 +671,7 @@ def handle_selected_snippets(selected_snippets):
     State("current-topic-id", 'data'),
     prevent_initial_call=True
 )
-def show_cluster_dialog(btn_show_clicks, search_term, is_open, btn_remove_clicks, btn_select_all_clicks, current_topic_id):
+def show_cluster_dialog_content(btn_show_clicks, search_term, is_open: bool, btn_remove_clicks, btn_select_all_clicks, current_topic_id):
     topic_model = cache.get('topic_model')
     selected_snippets = cache.get("selected_snippets")
 
@@ -721,7 +726,7 @@ def show_cluster_dialog(btn_show_clicks, search_term, is_open, btn_remove_clicks
     State("current-topic-id", 'data'),
     prevent_initial_call=True,
 )
-def handle_assign_snippets(assign_clicks, selected_snippets, selected_topic, current_topic_id):
+def handle_assign_snippets(assign_clicks, selected_snippets, selected_topic, current_topic_id) -> Tuple[Sequence[str], Sequence[Dict[str, str]]]:
     topic_model = cache.get('topic_model')
 
     if not assign_clicks or not selected_snippets:
@@ -746,7 +751,7 @@ def handle_assign_snippets(assign_clicks, selected_snippets, selected_topic, cur
     Input('upload-btn', 'n_clicks'),
     State('upload-modal', 'is_open'),
 )
-def toggle_modal(n_clicks, is_open):
+def toggle_modal(n_clicks: int, is_open: bool) -> bool:
     if n_clicks or is_open:
         return not is_open
     return is_open
@@ -782,6 +787,12 @@ def handle_file_selection(filename, contents):
         else:
             return 'Please upload a .csv, .tsv or .json file.', [], {'display': 'block'}
 
+        # remove all rows whose snippet or replace is not string
+        df = df[df['snippet'].apply(lambda x: isinstance(x, str))]
+        df = df[df['replace'].apply(lambda x: isinstance(x, str))]
+        # drop all rows with empty snippets or replace
+        df = df[df['snippet'].apply(lambda x: len(x) > 0)]
+        df = df[df['replace'].apply(lambda x: len(x) > 0)]
         classifications = get_classification_counts(df)
         classifications_sorted_by_count = [classification for classification, count in sorted(classifications.items(),
                                                                                               key=lambda x: x[1], reverse=True)]
@@ -795,7 +806,7 @@ def handle_file_selection(filename, contents):
                                                   for label in classifications_sorted_by_count], {'display': 'block'}
     except Exception as e:
         print(e)
-        return 'There was an error processing this file.', [], {'display': 'block'}
+        return f'There was an error processing this file.\n{e}', [], {'display': 'block'}
 
 
 @app.callback(
@@ -811,7 +822,18 @@ def update_topic_model_training(selected_options, topic_model_value):
         return dash.no_update
 
 
-def create_layout(classifications):
+@app.callback(
+    Output('label-dropdown', 'value'),
+    Input('select-all-labels-btn', 'n_clicks'),
+    State('label-dropdown', 'options')
+)
+def select_all_labels(n_clicks: int, options):
+    if n_clicks > 0:
+        return [option['value'] for option in options]
+    return []
+
+
+def create_layout(classifications) -> None:
 
     filename_modal = dcc.Loading(
         type="default",
@@ -893,6 +915,7 @@ def create_layout(classifications):
                      for label in classifications],
             multi=True
         ),
+        html.Button('Select All', id='select-all-labels-btn', n_clicks=0),
     ])
 
     main_layout = html.Div([
@@ -938,11 +961,11 @@ def create_layout(classifications):
                 html.Label('Min cluster size'),
                 dcc.RangeSlider(
                     id='min-cluster-size-range',
-                    min=10,
+                    min=0,
                     max=80,
                     step=1,
-                    marks={i: str(i) for i in range(10, 81, 10)},
-                    value=[25, 60],
+                    marks={i: str(i) for i in range(0, 81, 10)},
+                    value=[7, 18],
                 ),
             ]),
             html.Div([
@@ -965,7 +988,7 @@ def create_layout(classifications):
                     max=20,
                     step=1,
                     marks={i: str(i) for i in range(2, 21, 2)},
-                    value=[4, 15],
+                    value=[2, 12],
                 ),
             ]),
             html.Div([
@@ -978,7 +1001,7 @@ def create_layout(classifications):
                     step=1,
                     marks={i: str(i) for i in itertools.chain(range(10, 101, 10), [2])},
                     # TODO make it dynamically marks={i: str(i) for i in itertools.chain(range(10, int(len(df_inference)/4)+1 if len(df_inference) > 0 else 101, int(len(df_inference)/40) if len(df_inference) > 0 else 10), [2])},
-                    value=[50, 80],
+                    value=[4, 15],
                 ),
             ]),
             html.Div([

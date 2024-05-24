@@ -16,12 +16,6 @@ import sys
 sys.path.append('../notebooks')
 
 
-def get_hyperparameter_string(hdbscan_umap_params):
-    hyperparam_string = ""
-    for key, value in hdbscan_umap_params.items():
-        hyperparam_string += "{}: {}, ".format(key.capitalize(), value)
-    return hyperparam_string[:-2]
-
 class ChatIntents:
     def __init__(self, df_training, df_inference):
         self.df_training = df_training
@@ -57,7 +51,7 @@ class ChatIntents:
                           n_components,
                           min_cluster_size,
                           min_samples=None,
-                          random_state=None):
+                          random_state=42):
         """
         Generate HDBSCAN clusters from UMAP embeddings of instance training
         embeddings
@@ -123,6 +117,12 @@ class ChatIntents:
 
         return label_count, cost
 
+    @staticmethod
+    def get_hyperparameter_string(hdbscan_umap_params):
+        hyperparam_string = ""
+        for key, value in hdbscan_umap_params.items():
+            hyperparam_string += "{}: {}, ".format(key.capitalize(), value)
+        return hyperparam_string[:-2]
 
     def _objective(self, space, params, label_lower, label_upper, metric='outliers'):
         """

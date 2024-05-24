@@ -35,7 +35,6 @@ Each embedding model can be trained on two formats of snippets, either the forma
 - embeddings_training_utils
 - utils
 - octis - contains diversity loss from OCTIS library instead of including OCTIS in the environment due to version incompatibility
-- model_freeze - included from S3BERT
 - GlanosBERTopic - extension of BERTopic library
 - GlanosSentenceTransformers - extension of SentenceTransformers library
 

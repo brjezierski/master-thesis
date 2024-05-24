@@ -1,5 +1,6 @@
+from typing import Any, Dict, List, Tuple, Union
 from sentence_transformers import losses
-import model_freeze as freeze
+from GlanosSentenceTransformers import GlanosSentenceTransformer
 import pandas as pd
 from sentence_transformers.datasets import SentenceLabelDataset
 from sentence_transformers.readers import InputExample
@@ -18,7 +19,17 @@ plt.style.use('ggplot')
 tqdm.pandas()
 
 
-def collect_classification_labels(df, verbose=False):
+def collect_classification_labels(df: pd.DataFrame, verbose: bool = False) -> pd.DataFrame:
+    """
+    Collects and processes unique classification labels from a DataFrame.
+    
+    Parameters:
+    - df: pd.DataFrame - The DataFrame containing classification data.
+    - verbose: bool - If True, prints the collected classification labels.
+
+    Returns:
+    - pd.DataFrame: The modified DataFrame with processed classification labels.
+    """
     if type(df['classification'].iloc[0]) == str:
         df['classification'] = df['classification'].str.split('|')
         replace_nan_with(df, ['classification'], [])
@@ -28,8 +39,17 @@ def collect_classification_labels(df, verbose=False):
     return df
 
 
-# Function to calculate cosine similarity between two embeddings
-def calculate_cosine_similarity(embedding1, embedding2):
+def calculate_cosine_similarity(embedding1: Union[np.ndarray, List[float]], embedding2: Union[np.ndarray, List[float]]) -> float:
+    """
+    Calculates the cosine similarity between two embeddings.
+    
+    Parameters:
+    - embedding1: Union[np.ndarray, List[float]] - The first embedding.
+    - embedding2: Union[np.ndarray, List[float]] - The second embedding.
+
+    Returns:
+    - float: The cosine similarity between the two embeddings.
+    """
     if type(embedding1) == list:
         embedding1 = np.array(embedding1)
     if type(embedding2) == list:
@@ -37,7 +57,18 @@ def calculate_cosine_similarity(embedding1, embedding2):
     return cosine_similarity(embedding1.reshape(1, -1), embedding2.reshape(1, -1))[0][0]
 
 
-def filter_top_values(row, selected_labels):
+def filter_top_values(row: pd.Series, labels_to_ignore: List[str]) -> str:
+    """
+    Since a row can contain more than one label, it filters and returns 
+    the first classification label from a row which is not in labels_to_ignore.
+
+    Parameters:
+    - row: pd.Series - A row from the DataFrame containing snippets with classification labels.
+    - labels_to_ignore: List[str] - List of selected labels to filter from.
+
+    Returns:
+    - str: Selected label.
+    """
     if type(row['classification']) == str:
         classifications = row['classification'].split('|')
     else:
@@ -46,28 +77,23 @@ def filter_top_values(row, selected_labels):
         return classifications[0].replace('\^', '')
     else:
         non_selected_labels = [
-            label for label in classifications if label not in selected_labels]
+            label for label in classifications if label not in labels_to_ignore]
         if non_selected_labels:
             return non_selected_labels[0].replace('\^', '')
         else:
             return classifications[0].replace('\^', '')
 
 
-def get_joint_classification(df):
-    # not currently used
-    for index, row in df.iterrows():
-        classification = row['classification']
-        if len(classification) == 0:
-            df.at[index, 'joint_classification'] = ""
-            continue
-        if len(classification) <= 1:
-            df.at[index, 'joint_classification'] = classification[-1]
-            continue
-        df.at[index, 'joint_classification'] = "-".join(row['classification'])
-    return df
+def get_classification_counts(df: pd.DataFrame) -> Dict[str, int]:
+    """
+    Counts the occurrences of each classification label in the DataFrame.
 
+    Parameters:
+    - df: pd.DataFrame - The DataFrame containing snippets with classification labels.
 
-def get_classification_counts(df):
+    Returns:
+    - Dict[str, int]: A dictionary with classification labels as keys and their counts as values.
+    """
     classification_counts = {}
     for classification in sorted(df['classification'].str.split('|').explode()):
         normalized_classification = classification.replace('\^', '')
@@ -78,7 +104,18 @@ def get_classification_counts(df):
     return classification_counts
 
 
-def get_relevant_classifications(df, params, verbose=False):
+def get_relevant_classifications(df: pd.DataFrame, params: Dict[str, Any], verbose: bool = False) -> Tuple[List[str], List[str]]:
+    """
+    Identifies relevant classifications based on given parameters.
+
+    Parameters:
+    - df: pd.DataFrame - The DataFrame containing snippets with classification labels.
+    - params: Dict[str, Any] - Hyperparameters containing occurence_cutoff.
+    - verbose: bool - If True, prints detailed classification counts.
+
+    Returns:
+    - Tuple[List[str], List[str]]: A tuple containing a list of all classifications and a list of classifications occuring more than the occurence_cutoff.
+    """
 
     def get_value_count(df, col):
         counts = df[col].explode().value_counts()
@@ -115,7 +152,18 @@ def get_relevant_classifications(df, params, verbose=False):
     return all_classifications, relevant_classifications
 
 
-def filter_relevant_classifications(df, all_classifications, relevant_classifications):
+def filter_relevant_classifications(df: pd.DataFrame, all_classifications: List[str], relevant_classifications: List[str]) -> Tuple[pd.DataFrame, Dict[str, int]]:
+    """
+    Filters the DataFrame to include only relevant classifications.
+
+    Parameters:
+    - df: pd.DataFrame - The DataFrame containing snippets with classification labels.
+    - all_classifications: List[str] - List of all classifications.
+    - relevant_classifications: List[str] - List of relevant classifications to filter.
+
+    Returns:
+    - Tuple[pd.DataFrame, Dict[str, int]]: A tuple containing the filtered DataFrame and a classification to index mapping.
+    """
     df = df[df['top_classification'] != '']
     df = df[df['top_classification'].isin(relevant_classifications)]
 
@@ -131,15 +179,31 @@ def filter_relevant_classifications(df, all_classifications, relevant_classifica
     return df, classifications
 
 
-def get_train_dev_test_split(df, val_dev_size=100):
+def get_train_dev_test_split(df: pd.DataFrame, val_dev_size: int) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Splits the DataFrame into training, development, and test sets. 
+    Creates the dev and test sets by sampling pairs of rows with the same classification,
+    while the training set contains the remaining rows.
 
-    def get_paired_dataset(df, size=100):
+    Parameters:
+    - df: pd.DataFrame - The DataFrame containing snippets with classification labels.
+    - val_dev_size: int - The size of the development and test sets.
+
+    Returns:
+    - Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]: A tuple containing the training, development, and test DataFrames.
+    """
+
+    def get_paired_dataset(df, size=val_dev_size):
         # Create an empty DataFrame to store the sampled rows
         new_df = pd.DataFrame(columns=df.columns)
 
         for _ in range(int(size / 2)):
             filtered_df = df[df['top_classification'].map(
                 df['top_classification'].value_counts()) > 1]
+            print('filtered_df', len(filtered_df))
+            if len(filtered_df) < 2:
+                raise ValueError(
+                    f"Cannot create a dataset with {size} samples, only {len(filtered_df)} samples available.")
             random_top_classification = random.choice(
                 filtered_df['top_classification'].unique())
             same_top_classification_rows = filtered_df[filtered_df['top_classification']
@@ -155,17 +219,25 @@ def get_train_dev_test_split(df, val_dev_size=100):
 
     train_df = df.copy()
     dev_df, train_df = get_paired_dataset(train_df, size=val_dev_size)
-    print('dev_df', len(dev_df))
-    print('train_df', len(train_df))
     test_df, train_df = get_paired_dataset(train_df, size=val_dev_size)
 
     return train_df, dev_df, test_df
 
 
-def triplets_from_labeled_dataset(input_examples):
-    # Create triplets for a [(label, sentence), (label, sentence)...] dataset
-    # by using each example as an anchor and selecting randomly a
-    # positive instance with the same label and a negative instance with a different label
+def triplets_from_labeled_dataset(input_examples: List[InputExample]) -> List[InputExample]:
+    """
+    Creates triplets from a [(label, sentence), (label, sentence)...] dataset 
+    for triplet loss training by using each example as an anchor and selecting 
+    randomly a positive instance with the same label and a negative instance
+    with a different label.
+
+    Parameters:
+    - input_examples: List[InputExample] - A list of InputExample objects containing individual labeled snippets.
+
+    Returns:
+    - List[InputExample]: A list of triplet InputExample objects.
+    """
+    # Create triplets for 
     triplets = []
     label2sentence = defaultdict(list)
     for inp_example in input_examples:
@@ -193,8 +265,22 @@ def triplets_from_labeled_dataset(input_examples):
 
     return triplets
 
+# TODO create Dataset class
+def split_data(df: pd.DataFrame, params: Dict[str, Any], label_map: Dict[str, int], val_dev_size: int = 100) -> Tuple[List[InputExample], List[InputExample], List[InputExample]]:
+    """
+    Prepares the data for training by extracting a top classification label for each snippet,
+    converts snippets into InputExample format required for training,
+    and creates triplets for the development and test sets.
 
-def get_dataset(df, params, label_map, val_dev_size=100):
+    Parameters:
+    - df: pd.DataFrame - The DataFrame containing snippets with classification labels.
+    - params: Dict[str, Any] - Hyperparameters.
+    - label_map: Dict[str, int] - Mapping from labels to their corresponding IDs.
+    - val_dev_size: int - The size of the development and test sets.
+
+    Returns:
+    - Tuple[List[InputExample], List[InputExample], List[InputExample]]: A tuple containing lists of InputExample objects for train, dev, and test sets.
+    """
     guid = 1
     train_df, dev_df, test_df = get_train_dev_test_split(df, val_dev_size)
 
@@ -212,14 +298,24 @@ def get_dataset(df, params, label_map, val_dev_size=100):
                 print(classification)
         datasets.append(examples)
 
-    random.seed(42)
-
-    dev_triplets = triplets_from_labeled_dataset(datasets[1])
+    dev_triplets = triplets_from_labeled_dataset(datasets[1]) # TODO why only dev and test are triplets 
     test_triplets = triplets_from_labeled_dataset(datasets[2])
     return datasets[0], dev_triplets, test_triplets
 
+# TODO create Dataset class
+def prepare_for_training(df: pd.DataFrame, classifications: Dict[str, int], params: Dict[str, Any], sbert_model: GlanosSentenceTransformer) -> Tuple[List[Tuple[DataLoader, Any]], TripletEvaluator, TripletEvaluator]:
+    """
+    Prepares the data and model for training.
 
-def prepare_for_training(classified_df, classifications, params, sbert_model):
+    Parameters:
+    - df: pd.DataFrame - The DataFrame containing snippets with classification labels.
+    - classifications: Dict[str, int] - Mapping from labels to their corresponding IDs.
+    - params: Dict[str, Any] - Parameters for training.
+    - sbert_model: GlanosSentenceTransformer - The GlanosSentenceTransformer model to be trained.
+
+    Returns:
+    - Tuple[List[Tuple[DataLoader, Any]], TripletEvaluator, TripletEvaluator]: The training objective, development evaluator, and test evaluator.
+    """
     num_epochs = params["epochs"]
     unfreeze_layers = params["unfreeze_layers"]
     inference_labels = params["inference_labels"] if "inference_labels" in params else []
@@ -227,12 +323,12 @@ def prepare_for_training(classified_df, classifications, params, sbert_model):
     snippet_column_name = params["snippet_column_name"]
 
     if unfreeze_layers:
-        freeze.freeze_except_last_layers(sbert_model, unfreeze_layers)
+        sbert_model.freeze_except_last_layers(unfreeze_layers)
     else:
-        freeze.freeze_all_layers(sbert_model)
+        sbert_model.freeze_all_layers()
 
-    train_set, dev_set, test_set = get_dataset(
-        classified_df, params, classifications, val_dev_size=params["val_dev_size"])
+    train_set, dev_set, test_set = split_data(
+        df, params, classifications, val_dev_size=params["val_dev_size"])
 
     print(f"e={num_epochs}" +
           (f", embeddings from {snippet_column_name}") +
@@ -252,46 +348,55 @@ def prepare_for_training(classified_df, classifications, params, sbert_model):
     train_dataloader = DataLoader(
         train_data_sampler, batch_size=params["batch_size"], drop_last=True)
 
-    dev_evaluator = TripletEvaluator.from_input_examples(
-        dev_set, name='Glanos')
+    dev_evaluator = TripletEvaluator.from_input_examples(dev_set)
+    test_evaluator = TripletEvaluator.from_input_examples(test_set)
 
     loss = losses.BatchAllTripletLoss(model=sbert_model)
 
-    test_evaluator = TripletEvaluator.from_input_examples(
-        test_set, name='Glanos')
     train_objective = [(train_dataloader, loss)]
 
     return train_objective, dev_evaluator, test_evaluator
 
+# TODO create Trainer class
+def train(training_data: List[pd.DataFrame], classifications: Union[Dict[str, int], List[Dict[str, int]]], params: Dict[str, Any], sbert_model: GlanosSentenceTransformer) -> Tuple[TripletEvaluator, GlanosSentenceTransformer]:
+    """
+    Trains the GlanosSentenceTransformer model on training_data with a batch all triplet loss function.
 
-def train(classified_df, classifications, params, sbert_model):
+    Parameters:
+    - training_data: Union[pd.DataFrame, List[pd.DataFrame]] - The list of dataframes containing training data.
+    - classifications: Union[Dict[str, int], List[Dict[str, int]]] - Mapping from labels to their corresponding IDs.
+    - params: Dict[str, Any] - Hyperparameters.
+    - sbert_model: GlanosSentenceTransformer - The GlanosSentenceTransformer model to be trained.
+
+    Returns:
+    - Tuple[TripletEvaluator, GlanosSentenceTransformer]: The test evaluator, and the trained SentenceTransformer model.
     """
-    This script trains sentence transformers with a batch all triplet loss function.
-    """
-    if type(classified_df) == list and len(classified_df) == len(classifications):
-        print('Training with multiple objectives')
-        steps_per_epoch = min([len(df)
-                              for df in classified_df]) / params["batch_size"]
-        train_objectives = []
-        for sub_classified_df, sub_classifications in zip(classified_df, classifications):
+    # TODO why batch all triplet loss?
+    print(f'Training with {len(training_data)} objectives')
+    assert type(training_data) == list or type(training_data) == pd.DataFrame
+
+    # if type(training_data) == list and len(training_data) == len(classifications):
+    steps_per_epoch = min([len(df)
+                              for df in training_data]) / params["batch_size"]
+    train_objectives = []
+    for sub_classified_df, sub_classifications in zip(training_data, classifications):
             train_objective, dev_evaluator, test_evaluator = prepare_for_training(
                 sub_classified_df, sub_classifications, params, sbert_model)
             train_objectives.extend(train_objective)
-    else:
-        print('Training with one objective')
-        steps_per_epoch = len(classified_df) / params["batch_size"]
-        train_objectives, dev_evaluator, test_evaluator = prepare_for_training(
-            classified_df, classifications, params, sbert_model)
+    # else:
+    #     print('Training with one objective')
+    #     steps_per_epoch = len(training_data) / params["batch_size"]
+    #     train_objectives, dev_evaluator, test_evaluator = prepare_for_training(
+    #         training_data, classifications, params, sbert_model)
 
     print("Performance before fine-tuning:")
     dev_evaluator(sbert_model)
 
-    model_fit = sbert_model.fit(
+    sbert_model.fit(
         train_objectives=train_objectives,
         evaluator=dev_evaluator,
         epochs=params["epochs"],
         evaluation_steps=100 if steps_per_epoch <= 200 else steps_per_epoch / 4,
-        warmup_steps=params["WARMUP_STEPS"],
         callback=callback
     )
-    return model_fit, test_evaluator, sbert_model
+    return test_evaluator, sbert_model
