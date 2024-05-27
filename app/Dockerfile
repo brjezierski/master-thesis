@@ -19,4 +19,9 @@ RUN python -c "import flask"
 
 # The code to run when container is started:
 COPY . .
+
+WORKDIR /app/src
+
+# RUN cd src
 ENTRYPOINT python app.py
+

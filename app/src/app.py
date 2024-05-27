@@ -1,34 +1,56 @@
-import base64
-import io
-import itertools
-import pickle
-from GlanosBERTopic import GlanosBERTopic
-from chatintents import ChatIntents
-import dash_bootstrap_components as dbc
-from dash import ctx, ALL
-from dash.dependencies import Input, Output, State
-import dash_html_components as html
-import dash_core_components as dcc
-import dash
-import time
-from hyperopt import hp
-import pandas as pd
-from utils import create_replace_no_tags_embeddings, load_data, replace_hashtags_in_named_entity_tags, str_to_numpy_converter
-from clustering_utils import remove_stopwords
-from GlanosSentenceTransformers import GlanosSentenceTransformer
-from embeddings_training_utils import train, filter_top_values, get_classification_counts
 import os
 import sys
+import time
+import random
+import base64
+import io
+
+from typing import Any, Dict, List, Sequence, Tuple
+
+import pandas as pd
+from hyperopt import hp
+from tqdm.notebook import tqdm
 from flask_caching import Cache
 
-from tqdm.notebook import tqdm
-from typing import Dict, List, Sequence, Tuple
-import random
+import dash
+import dash_bootstrap_components as dbc
+from dash import html, dcc, ctx, ALL
+from dash.dependencies import Input, Output, State
+
+from components import (
+    create_filename_modal,
+    create_snippets_modal,
+    create_upload_modal,
+    create_label_selection,
+    create_embedding_model_section,
+    create_topic_model_section,
+    create_parameter_sliders,
+    create_parameter_inputs,
+    create_other_parameter_inputs,
+    create_outlier_checklist,
+    create_merge_section,
+    create_buttons,
+    create_cluster_management_modal
+)
+
+from utils import (
+    remove_stopwords,
+    create_replace_no_tags_embeddings,
+    load_data,
+    replace_hashtags_in_named_entity_tags,
+    str_to_numpy_converter,
+    filter_top_values,
+    get_classification_counts
+)
+
+from MyBERTopic import MyBERTopic
+from MyTrainer import MyTrainer
+from MySentenceTransformer import MySentenceTransformer
+from ParameterOptimizer import ParameterOptimizer
 
 tqdm.pandas()
-sys.path.append('chat-intents/chatintents')
 
-OUTPUT_DIR = 'output'
+OUTPUT_DIR = '../data/output'
 DATA_DIR = 'data'
 EMBEDDING_MODEL_DIR = 'embedding_models'
 REPLACE_HASHTAG_IN_NAMED_ENTITIES_DIR = 'replacing_#_in_NE'
@@ -44,17 +66,20 @@ DEFAULT_N_COMPONENTS = 2
 DEFAULT_N_NEIGHBORS = 4 # 51
 DEFAULT_TOP_N_TOPIC_WORDS = 5 # 10
 
-# 'remove_named_entity_tags', 'replace_hashtag_in_named_entities'
-DEFAULT_SNIPPET_PROCESSING_STRATEGY = 'replace_hashtag_in_named_entities'
+DEFAULT_SNIPPET_PROCESSING_STRATEGY = 'replace_hashtag_in_named_entities' # 'remove_named_entity_tags', 'replace_hashtag_in_named_entities'
 
 
 class TopicModelingApp:
+    '''
+    Class for the main application that runs the topic modeling dashboard.
+    It contains methods for setting up the directories, creating the layout, and setting up the callbacks.    
+    '''
 
     def __init__(self):
         self.app = dash.Dash(external_stylesheets=[dbc.themes.BOOTSTRAP], suppress_callback_exceptions=True)
         self.cache = Cache(self.app.server, config={
             'CACHE_TYPE': 'filesystem',
-            'CACHE_DIR': 'cache-directory',
+            'CACHE_DIR': '../data/cache-directory',
             'CACHE_DEFAULT_TIMEOUT': 0,
             'CACHE_THRESHOLD': 200
         })
@@ -78,6 +103,9 @@ class TopicModelingApp:
         self.app.run_server(debug=True, host='0.0.0.0', port=9000)
 
     def setup_directories(self):
+        '''
+        Create the necessary directories for the application models and data.
+        '''
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
         if not os.path.exists(f'{self.output_dir}/{DATA_DIR}'):
@@ -87,259 +115,50 @@ class TopicModelingApp:
         if not os.path.exists(f'{self.output_dir}/{TOPIC_MODEL_DIR}'):
             os.makedirs(f'{self.output_dir}/{TOPIC_MODEL_DIR}')
 
-
     def create_layout(self, classifications: List[str]) -> None:
+        '''
+        Create the main layout for the Dash application.
 
-        filename_modal = dcc.Loading(
-            type="default",
-            children=html.Div(id='filename-modal', style={'display': 'none'}, children=[
-                html.Div([
-                    html.Label('Enter the filename:'),
-                    dcc.Input(id='filename-input', type='text',
-                            placeholder='Filename'),
-                    html.Div([
-                        dbc.Checklist(
-                            options=[{'label': 'Include embeddings',
-                                    'value': 'embeddings'}],
-                            value=['embeddings'],
-                            id="filename-embeddings-checklist",
-                        ),
-                    ], style={'display': 'none'}, id='filename-embeddings-checklist-div'),
-                    html.Button('Save', id='filename-confirm'),
-                    html.Button('Cancel', id='filename-cancel'),
-                ], className='modal-content')
-            ])
-        )
-
-        snippets_modal = dbc.Modal(
-            [
-                dbc.ModalHeader([
-                    dbc.ModalTitle(id="snippets-modal-title"),
-                ]),
-                dbc.ModalFooter([
-                    html.Div([
-                                dcc.Dropdown(
-                                    id="dropdown-assign",
-                                    options=[],
-                                ),
-                                dbc.Button(
-                                    "Assign", id="btn-assign", n_clicks=0)
-                                ], style={'width': '100%'}),
-                    dbc.Button(
-                                "Select All", id="btn-select-all", n_clicks=0),
-                    dcc.Input(id='snippet-search', type='text',
-                                placeholder='Search Snippets'),
-                    dbc.Button("Remove Cluster",
-                            id="btn-remove-cluster", n_clicks=0),
-                    dbc.Button('Add New Cluster', id='snippets-modal-add-new-cluster-btn', n_clicks=0),
-                ]
-                ),
-                dbc.ModalBody(id="snippets-modal-content",
-                            children='Snippets listed'),
-            ],
-            id="snippets-modal",
-            is_open=False,
-            scrollable=True,
-            size="lg"
-        )
-
-        upload_modal = dcc.Upload(
-            id='upload-data',
-            children=html.Div([
-                'Drag and Drop or ',
-                html.A('Select Files')
-            ]),
-            style={
-                'width': '100%',
-                'height': '60px',
-                'lineHeight': '60px',
-                'borderWidth': '1px',
-                'borderStyle': 'dashed',
-                'borderRadius': '5px',
-                'textAlign': 'center',
-                'margin': '10px'
-            },
-            multiple=False
-        )
-
-        label_selection = html.Div([
-            html.Div(children='Select classification labels for inference'),
-            dcc.Dropdown(
-                id='label-dropdown',
-                options=[{'label': label, 'value': label}
-                        for label in classifications],
-                multi=True
-            ),
-            html.Button('Select All', id='select-all-labels-btn', n_clicks=0),
-        ])
+        Args:
+            classifications (List[str]): List of classification labels.
+        '''
+        filename_modal = create_filename_modal()
+        snippets_modal = create_snippets_modal()
+        upload_modal = create_upload_modal()
+        label_selection = create_label_selection(classifications)
+        embedding_model_section = create_embedding_model_section(self.retrieve_all_model_options, EMBEDDING_MODEL_DIR, DEFAULT_EMBEDDING_MODEL)
+        topic_model_section = create_topic_model_section(self.retrieve_all_model_options, TOPIC_MODEL_DIR, DEFAULT_TOPIC_MODEL)
+        parameter_sliders = create_parameter_sliders()
+        parameter_inputs = create_parameter_inputs(DEFAULT_MIN_CLUSTER_SIZE, DEFAULT_MIN_SAMPLES, DEFAULT_N_COMPONENTS, DEFAULT_N_NEIGHBORS, DEFAULT_TOP_N_TOPIC_WORDS)
+        other_parameter_inputs = create_other_parameter_inputs(DEFAULT_TOP_N_TOPIC_WORDS)
+        outlier_checklist = create_outlier_checklist()
+        merge_section = create_merge_section()
+        buttons = create_buttons()
+        cluster_management_modal = create_cluster_management_modal()
 
         main_layout = html.Div([
             snippets_modal,
             label_selection,
-            html.Div([
-                dcc.Checklist(
-                    id='embedding-training-checklist',
-                    options=[{'label': 'Train the embedding model',
-                            'value': 'embedding_training'}],
-                    value=[]
-                ),
-                dcc.Dropdown(
-                    id='embedding-model-dropdown',
-                    options=self.get_all_model_options(
-                        EMBEDDING_MODEL_DIR),
-                    value=[DEFAULT_EMBEDDING_MODEL],
-                    multi=False
-                )], id='embedding-model-dropdown-div'
-            ),
-            html.Div([
-                dcc.Checklist(
-                    id='topic-model-training-checklist',
-                    options=[{'label': 'Train the topic model',
-                            'value': 'topic_model_training'}],
-                    value=['topic_model_training']
-                ),
-                dcc.Dropdown(
-                    id='topic-model-dropdown',
-                    options=self.get_all_model_options(
-                        TOPIC_MODEL_DIR),
-                    value=[DEFAULT_TOPIC_MODEL],
-                    multi=False
-                )], id='topic-model-dropdown-div'
-            ),
+            embedding_model_section,
+            topic_model_section,
             dcc.Checklist(
                 id='param-search-checklist',
-                options=[{'label': 'Run parameter search',
-                        'value': 'parameter_search'}],
+                options=[{'label': 'Run parameter search', 'value': 'parameter_search'}],
             ),
-            html.Div([
-                html.Div([
-                    html.Label('Min cluster size'),
-                    dcc.RangeSlider(
-                        id='min-cluster-size-range',
-                        min=0,
-                        max=80,
-                        step=1,
-                        marks={i: str(i) for i in range(0, 81, 10)},
-                        value=[7, 18],
-                    ),
-                ]),
-                html.Div([
-                    html.Label('Min samples'),
-                    dcc.RangeSlider(
-                        id='min-samples-range',
-                        min=1,
-                        max=10,
-                        step=1,
-                        marks={i: str(i) for i in range(1, 11)},
-                        value=[1, 4],
-                    ),
-                ]),
-
-                html.Div([
-                    html.Label('Number of components'),
-                    dcc.RangeSlider(
-                        id='n-components-range',
-                        min=2,
-                        max=20,
-                        step=1,
-                        marks={i: str(i) for i in range(2, 21, 2)},
-                        value=[2, 12],
-                    ),
-                ]),
-                html.Div([
-                    html.Label('Number of neighbors'),
-                    dcc.RangeSlider(
-                        id='n-neighbors-range',
-                        min=2,
-                        max=100,
-                        # TODO make it dynamically int(len(df_inference)/4) if len(df_inference) > 0 else 100
-                        step=1,
-                        marks={i: str(i) for i in itertools.chain(range(10, 101, 10), [2])},
-                        # TODO make it dynamically marks={i: str(i) for i in itertools.chain(range(10, int(len(df_inference)/4)+1 if len(df_inference) > 0 else 101, int(len(df_inference)/40) if len(df_inference) > 0 else 10), [2])},
-                        value=[4, 15],
-                    ),
-                ]),
-                html.Div([
-                    html.Label('Number of iterations'),
-                    dcc.Input(id='bayesian-iterations', type='number', value=5),
-                ])
-            ], id='params-range-div', style={'display': 'none'}),  # Hidden by default
-
-            html.Div([
-                html.Label('Minimum cluster size'),
-                dcc.Input(id='min-cluster-size', type='number', value=DEFAULT_MIN_CLUSTER_SIZE),
-
-                html.Label('Min samples'),
-                dcc.Input(id='min-samples', type='number', value=DEFAULT_MIN_SAMPLES),
-
-                html.Label('Number of components'),
-                dcc.Input(id='n-components', type='number', value=DEFAULT_N_COMPONENTS),
-
-                html.Label('Number of neighbors'),
-                dcc.Input(id='n-neighbors', type='number', value=DEFAULT_N_NEIGHBORS),
-            ], id='params-div', style={'display': 'block'}),
-            html.Div([
-                html.Label('Top n keywords'),
-                dcc.Input(id='top-n-topics', type='number', value=DEFAULT_TOP_N_TOPIC_WORDS),
-            ], id='other-params-div', style={'display': 'block'}),
-            # Checkbox for removing outliers
-            dcc.Checklist(
-                id='outlier-checklist',
-                options=[{'label': 'Reduce outliers', 'value': 'reduce_outliers'}],
-                value=[],
-            ),
-
-            html.Div([
-                html.Div(children='Select clusters to merge'),
-                html.Div(
-                    id='topic-merge-dropdown-div',
-                    children=[
-                        dcc.Dropdown(
-                            id='topic-merge-dropdown',
-                            multi=True
-                        )
-                    ]
-                )
-            ], id='merge-div', style={'display': 'none'}),
-
-            html.Button('Run', id='run-btn', n_clicks=0),
-            html.Button('Save state', id='save-state-btn', n_clicks=0),
-            html.Button('Load state', id='load-state-btn', n_clicks=0),
-            html.Button('Cluster Management', id='cluster-managment-btn',
-                        n_clicks=0),
-            html.Button('Save File', id='save-file-btn',
-                        n_clicks=0),
-            html.Button('Save Embedding Model', id='save-embedding-model-btn',
-                        n_clicks=0),
-            html.Button('Save Topic Model', id='save-topic-model-btn',
-                        n_clicks=0),
+            parameter_sliders,
+            parameter_inputs,
+            other_parameter_inputs,
+            outlier_checklist,
+            merge_section,
+            buttons,
             filename_modal,
-
             html.Div(id='output-container'),
             html.Div(id='output-container-2'),
             html.Div(id='output-container-3'),
-            dbc.Modal([
-                dbc.ModalHeader([
-                    dbc.ModalTitle(
-                                "Cluster Management"),
-                ]),
-                dbc.ModalBody([
-                                dbc.Button('Add New Cluster', id='add-new-cluster-btn', n_clicks=0),
-                                dbc.Button('Recalculate Cluster Info', id='recalculate-cluster-info-btn', n_clicks=0),
-                                html.Div(id='topic-list', children=[])
-                            ])
-                ],
-                id="cluster-dialog",
-                is_open=False,
-                scrollable=True,
-                size="xl"
-            ),
+            cluster_management_modal,
             html.Hr(),
             html.Div(id='hyperparameters-display'),
-            dcc.Loading(
-                id="loading-controls-and-graph",
-                type="default",
-                children=dcc.Graph(figure={}, id='controls-and-graph')),
+            dcc.Loading(id="loading-controls-and-graph", type="default", children=dcc.Graph(figure={}, id='controls-and-graph')),
         ])
 
         app_layout = [
@@ -347,18 +166,10 @@ class TopicModelingApp:
             dcc.Store(id='first-run-flag'),
             dcc.Store(id='last-opened-save-modal'),
             dcc.Store(id='current-topic-id', storage_type='local'),
-            dcc.ConfirmDialog(
-                id='add-new-cluster-confirm-dialog',
-            ),
-            dcc.ConfirmDialog(
-                id='state-confirm-dialog',
-            ),
+            dcc.ConfirmDialog(id='add-new-cluster-confirm-dialog'),
+            dcc.ConfirmDialog(id='state-confirm-dialog'),
             upload_modal,
-            dcc.Loading(
-                id="loading",
-                type="default",
-                children=html.Div(id='selected-file-output')
-            ),
+            dcc.Loading(id="loading", type="default", children=html.Div(id='selected-file-output')),
             html.Hr(),
             main_layout,
         ]
@@ -370,21 +181,21 @@ class TopicModelingApp:
             Output('run-btn', 'disabled'),
             Input('label-dropdown', 'value'),
             Input('topic-merge-dropdown', 'value')
-        )(self.enable_run_button)
+        )(self.enable_run_button_callback)
 
         self.app.callback(
             Output('params-div', 'style'),
             Output('params-range-div', 'style'),
             Input('param-search-checklist', 'value')
-        )(self.enable_params_div)
+        )(self.enable_params_div_callback)
 
         self.app.callback(
             Output('snippet-processing-strategy', 'data'),
             Input('embedding-model-dropdown', 'value'),
             Input('topic-model-dropdown', 'value'),
             State('snippet-processing-strategy', 'data'),
-        )(self.assign_selected_models)
-        
+        )(self.assign_selected_models_callback)
+
         self.app.callback(
             Output('state-confirm-dialog', 'displayed'),
             Output('state-confirm-dialog', 'message'),
@@ -394,14 +205,14 @@ class TopicModelingApp:
             State('app-layout-div', 'children'),
             State('controls-and-graph', 'figure'),
             prevent_initial_call=True
-        )(self.save_and_load_state)
+        )(self.save_and_load_state_callback)
 
         self.app.callback(
             Output('embedding-model-dropdown', 'options'),
             Output('topic-model-dropdown', 'options'),
             Input('embedding-model-dropdown-div', 'n_clicks'),
             Input('topic-model-dropdown-div', 'n_clicks'),
-        )(self.enable_training_divs)
+        )(self.fill_topic_and_embedding_model_options_callback)
 
         self.app.callback(
             Output('controls-and-graph', 'figure'),
@@ -410,7 +221,7 @@ class TopicModelingApp:
             Input('run-btn', 'n_clicks'),
             Input('cluster-dialog', 'is_open'),
             Input('label-dropdown', 'value'),
-            State('label-dropdown', 'options'),    
+            State('label-dropdown', 'options'),
             State('embedding-training-checklist', 'value'),
             State('topic-model-training-checklist', 'value'),
             State('outlier-checklist', 'value'),
@@ -431,32 +242,32 @@ class TopicModelingApp:
             State('snippet-processing-strategy', 'data'),
             State('app-layout-div', 'children'),
             prevent_initial_call=True
-        )(self.run_modeling)
+        )(self.run_modeling_callback)
 
         self.app.callback(
             Output('cluster-dialog', 'is_open'),
             Output('topic-list', 'children'),
             Output('add-new-cluster-confirm-dialog', 'displayed'),
             Output('add-new-cluster-confirm-dialog', 'message'),
-            Input('cluster-managment-btn', 'n_clicks'),
+            Input('cluster-management-btn', 'n_clicks'),
             Input("snippets-modal", "is_open"),
             Input('add-new-cluster-btn', 'n_clicks'),
             Input('snippets-modal-add-new-cluster-btn', 'n_clicks'),
             Input('recalculate-cluster-info-btn', 'n_clicks'),
             prevent_initial_call=True
-        )(self.show_cluster_dialog)
+        )(self.show_cluster_dialog_callback)
 
         self.app.callback(
             Output("dropdown-assign", "style"),
             Input({"type": "topic-name", "index": ALL}, "value"),
             State({"type": "topic-name", "index": ALL}, "id"),
-        )(self.update_cluster_names)
+        )(self.update_cluster_names_callback)
 
         self.app.callback(
             Output("output-container", "style"),
             Input("snippets-checklist", "value"),
             prevent_initial_call=True,
-        )(self.handle_selected_snippets)
+        )(self.handle_selected_snippets_callback)
 
         self.app.callback(
             Output("snippets-modal", "is_open"),
@@ -471,7 +282,7 @@ class TopicModelingApp:
             Input("btn-select-all", "n_clicks"),
             State("current-topic-id", 'data'),
             prevent_initial_call=True
-        )(self.show_cluster_dialog_content)
+        )(self.show_cluster_dialog_content_callback)
 
         self.app.callback(
             Output("snippets-checklist", "value"),
@@ -481,13 +292,13 @@ class TopicModelingApp:
             State("dropdown-assign", "value"),
             State("current-topic-id", 'data'),
             prevent_initial_call=True,
-        )(self.handle_assign_snippets)
+        )(self.handle_assign_snippets_callback)
 
         self.app.callback(
             Output('upload-modal', 'is_open'),
             Input('upload-btn', 'n_clicks'),
             State('upload-modal', 'is_open'),
-        )(self.toggle_modal)
+        )(self.toggle_modal_callback)
 
         self.app.callback(
             Output('selected-file-output', 'children'),
@@ -496,20 +307,20 @@ class TopicModelingApp:
             State('upload-data', 'filename'),
             Input('upload-data', 'contents'),
             prevent_initial_call=True,
-        )(self.handle_file_selection)
+        )(self.handle_file_selection_callback)
 
         self.app.callback(
             Output('topic-model-training-checklist', 'value'),
             Input('param-search-checklist', 'value'),
             Input('topic-model-dropdown', 'value'),
             prevent_initial_call=True
-        )(self.update_topic_model_training)
+        )(self.update_topic_model_training_callback)
 
         self.app.callback(
             Output('label-dropdown', 'value'),
             Input('select-all-labels-btn', 'n_clicks'),
             State('label-dropdown', 'options')
-        )(self.select_all_labels)
+        )(self.select_all_classification_labels_callback)
 
         self.app.callback(
             Output('filename-modal', 'style'),
@@ -525,28 +336,53 @@ class TopicModelingApp:
             State('last-opened-save-modal', 'data'),
             State('snippet-processing-strategy', 'data'),
             prevent_initial_call=True
-        )(self.handle_saving_modal)
+        )(self.handle_saving_modal_callback)
 
-    def enable_run_button(self, selected_labels: Sequence[str], selected_clusters) -> bool:
+    def enable_run_button_callback(self, selected_labels: List[str], selected_clusters_to_merge: List[int]) -> bool:
         '''
-        Enable the "Run" button if inference is not empty and either no clusters selected to merge or more than two
+        Enable the "Run" button when classification labels are selected.
+        If any clusters are selected to merge, ensure it is at least two.
+        
+        Args:
+        - selected_labels (List[str]): Selected classification labels (Input).
+        - selected_clusters_to_merge (List[int]): Selected clusters to merge (Input).
+
+        Returns:
+        - bool: True if the 'Run' button should be enabled, False otherwise.
         '''
-        if not selected_clusters:
+        if not selected_clusters_to_merge:
             return not bool(selected_labels)
         else:
-            if len(selected_clusters) >= 2:
+            if len(selected_clusters_to_merge) >= 2:
                 return False
             print("You need to select at least two clusters to merge")
             return True
 
-    def enable_params_div(self, param_search_value):
+    def enable_params_div_callback(self, param_search_value: bool) -> Tuple[Dict[str, str], Dict[str, str]]:
+        '''
+        Enable or disable parameter search div based on whether the Bayesian search has been selected.
+        
+        Parameters:
+        - param_search_value: bool - Value indicating if the Bayesian search was checked (Input).
+
+        Returns:
+        - Tuple[Dict[str, str], Dict[str, str]]: Styles for 'params-div' and 'params-range-div'.
+        '''
         if not param_search_value or 'parameter_search' not in param_search_value:
             return {'display': 'block'}, {'display': 'none'}
         return {'display': 'none'}, {'display': 'block'}
 
-    def assign_selected_models(self, embedding_model_value, topic_model_value, snippet_processing_strategy):
+    def assign_selected_models_callback(self, embedding_model_value: str, topic_model_value: str, snippet_processing_strategy: str) -> str:
         '''
-        Assign the selected embedding and topic models to the cache
+        Assigns the selected embedding and topic models to the cache and updates the snippet processing strategy.
+
+        Parameters:
+        - embedding_model_value: str - Selected embedding model from the dropdown (Input).
+        - topic_model_value: str - Selected topic model from the dropdown (Input).
+        - snippet_processing_strategy: str - Current snippet processing strategy (State).
+
+        Returns:
+        - str: Updated snippet processing strategy.
         '''
         if type(embedding_model_value) == list:
             embedding_model_value = embedding_model_value[0]
@@ -558,55 +394,124 @@ class TopicModelingApp:
 
         # Read from huggingface
         if not embedding_model_value or DEFAULT_EMBEDDING_MODEL in embedding_model_value:
-            embedding_model = GlanosSentenceTransformer(DEFAULT_EMBEDDING_MODEL)
+            embedding_model = MySentenceTransformer(DEFAULT_EMBEDDING_MODEL)
         # Read locally with a path
         else:
             if REPLACE_HASHTAG_IN_NAMED_ENTITIES_DIR in embedding_model_value:
                 snippet_processing_strategy = 'replace_hashtag_in_named_entities'
             elif REMOVE_NAMED_ENTITY_TAGS in embedding_model_value:
                 snippet_processing_strategy = 'remove_named_entity_tags'
-            embedding_model = GlanosSentenceTransformer(
-                    f'{OUTPUT_DIR}/{EMBEDDING_MODEL_DIR}/{embedding_model_value}')
+            embedding_model = MySentenceTransformer(
+                    f'{self.output_dir}/{EMBEDDING_MODEL_DIR}/{embedding_model_value}')
         self.cache.set('embedding_model', embedding_model)
         return snippet_processing_strategy
 
-    def save_and_load_state(self, save_state_n_clicks, load_state_n_clicks, app_layout, fig):
+    def save_and_load_state_callback(self, save_state_n_clicks: int, load_state_n_clicks: int, app_layout: List, fig: Dict):
+        '''
+        Handles saving and loading the app state to and from cache.
+
+        Parameters:
+        - save_state_n_clicks: int - Number of clicks on the 'Save State' button (Input).
+        - load_state_n_clicks: int - Number of clicks on the 'Load State' button (Input).
+        - app_layout: list - Layout of the application (State).
+        - fig: dict - Current state of the figure (State).
+
+        Returns:
+        - Tuple[bool, str, list]: A tuple containing:
+            - A boolean indicating if the state was saved.
+            - A string message for the confirmation dialog.
+            - The updated application layout.
+        '''
         if ctx.triggered_id == 'save-state-btn':
-            print('save-state-btn save state')
             self.save_state(app_layout, fig)
             return True, 'State saved.', app_layout
         elif ctx.triggered_id == 'load-state-btn':
             return False, '', self.cache.get('app_layout')
         raise dash.exceptions.PreventUpdate
 
-    def enable_training_divs(self, embedding_model_n_clicks, topic_model_n_clicks):
-        embedding_options = self.get_all_model_options(
+    def fill_topic_and_embedding_model_options_callback(self, embedding_model_n_clicks: int, topic_model_n_clicks: int) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
+        '''
+        Fills the training dropdowns with the embedding and topic model options.
+
+        Parameters:
+        - embedding_model_n_clicks: int - Number of clicks on the embedding model div (Input).
+        - topic_model_n_clicks: int - Number of clicks on the topic model div (Input).
+
+        Returns:
+        - Tuple[List[Dict[str, str]], List[Dict[str, str]]]: Options for embedding and topic model dropdowns.
+        '''
+        embedding_options = self.retrieve_all_model_options(
             EMBEDDING_MODEL_DIR)
-        topic_model_options = self.get_all_model_options(
+        topic_model_options = self.retrieve_all_model_options(
             TOPIC_MODEL_DIR)
         return embedding_options, topic_model_options
 
-    def run_modeling(self, n_clicks: int, is_cluster_dialog_open: bool, selected_labels: Sequence[str], 
-                    classification_labels: Sequence[str], embedding_training_checklist, topic_model_training_checklist, reduce_outliers, param_search,
-                    min_cluster_size_value, min_samples_value, n_components_value, n_neighbors_value, top_n_topic_words_value,
-                    min_cluster_size_range, min_samples_range, n_components_range, n_neighbors_range, bayesian_iterations, hyperparam_string: str,
-                    fig, first_run_flag, snippet_processing_strategy, app_layout):
+    def run_modeling_callback(self, n_clicks: int, is_cluster_dialog_open: bool, selected_labels: Sequence[str], 
+                            classification_labels: Sequence[str], embedding_training_checklist: Sequence[str], 
+                            topic_model_training_checklist: Sequence[str], reduce_outliers: bool, param_search: bool,
+                            min_cluster_size_value: int, min_samples_value: int, n_components_value: int, 
+                            n_neighbors_value: int, top_n_topic_words_value: int, min_cluster_size_range: Sequence[int], 
+                            min_samples_range: Sequence[int], n_components_range: Sequence[int], n_neighbors_range: Sequence[int], 
+                            bayesian_iterations: int, hyperparam_string: str, fig: Dict, first_run_flag: bool, 
+                            snippet_processing_strategy: str, app_layout: List) -> Tuple[dict, list, bool]:
+        '''
+        Manages the workflow involved in initializing and retrieving cached models and data, 
+        updating the figure when the label dropdown changes, 
+        and reflecting topic assignment changes when the cluster dialog is closed. 
+        When the "Run" button is clicked, it prepares data, performs a Bayesian search for hyperparameters if needed, 
+        and trains the topic model on the first run or reduces outliers if specified. 
+        It then updates the document embeddings visualization, updates the topics, and saves the application state, 
+        returning the updated figure, hyperparameters display, and first run flag. 
+        If none of these actions are triggered, the function prevents updates to the app.
+
+        Parameters:
+        - n_clicks (int): Number of clicks on the run button (input).
+        - is_cluster_dialog_open (bool): State of the cluster dialog (input).
+        - selected_labels (Sequence[str]): Labels selected by the user (input).
+        - classification_labels (Sequence[str]): All available classification labels (state).
+        - embedding_training_checklist (Sequence[str]): Embedding training options selected by the user (state).
+        - topic_model_training_checklist (Sequence[str]): Topic model training options selected by the user (state).
+        - reduce_outliers (bool): Whether to reduce outliers in the model (state).
+        - param_search (bool): Whether to perform parameter search (state).
+        - min_cluster_size_value (int): Minimum cluster size value for HDBSCAN (state).
+        - min_samples_value (int): Minimum samples value for HDBSCAN (state).
+        - n_components_value (int): Number of components for dimensionality reduction (state).
+        - n_neighbors_value (int): Number of neighbors for dimensionality reduction (state).
+        - top_n_topic_words_value (int): Number of top words for each topic (state).
+        - min_cluster_size_range (Sequence[int]): Range of minimum cluster size for Bayesian search (state).
+        - min_samples_range (Sequence[int]): Range of minimum samples for Bayesian search (state).
+        - n_components_range (Sequence[int]): Range of components for Bayesian search (state).
+        - n_neighbors_range (Sequence[int]): Range of n neighbors for Bayesian search (state).
+        - bayesian_iterations (int): Number of iterations for Bayesian search (state).
+        - hyperparam_string (str): Hyperparameters display string (state).
+        - fig (dict): Current state of the figure (state).
+        - first_run_flag (bool): Flag indicating whether it is the first run (state).
+        - snippet_processing_strategy (str): Strategy for processing snippets (state).
+        - app_layout (list): Layout of the application (state).
+
+        Returns:
+        - Tuple[dict, list, bool]: Updated figure, hyperparameters display list, and first run flag.
+        '''
         random.seed(42)
         embedding_model = self.cache.get('embedding_model')
-        topic_model = self.cache.get('topic_model')
+        try:
+            topic_model = self.cache.get('topic_model')
+        except:
+            topic_model = None
         topic_model_name = self.cache.get('topic_model_name')
         df = self.cache.get('df')
+
 
         if ctx.triggered_id == 'label-dropdown':
             return fig, hyperparam_string, True
 
         classifications = {classification_label['value']: i for i, classification_label in enumerate(classification_labels)}
 
-        is_topic_model_training = 'topic_model_training' in topic_model_training_checklist or topic_model_name == "DEFAULT_TOPIC_MODEL"
+        is_topic_model_trained = 'topic_model_training' in topic_model_training_checklist or topic_model_name == "DEFAULT_TOPIC_MODEL"
 
         # On closing the cluster dialog, update the figure since the topic assignment might have changed
         if ctx.triggered_id == 'cluster-dialog' and not is_cluster_dialog_open:
-            fig = topic_model.reduce_dim_and_visualize_documents(reuse_reduced_embeddings=True) # reuse reduced_embeddings to not have to recompute them and save time 
+            fig = topic_model.reduce_dim_and_visualize_documents(reuse_reduced_embeddings=False) # reuse reduced_embeddings to not have to recompute them and save time 
             self.save_state(app_layout, fig)
             return fig, hyperparam_string, first_run_flag
 
@@ -618,15 +523,15 @@ class TopicModelingApp:
 
             if first_run_flag or param_search:
                 self.params['inference_labels'] = selected_labels
-                df_training, df_inference = self.get_data(selected_labels, classifications, snippet_processing_strategy,
+                df_training, df_inference = self.split_and_encode_data(selected_labels, classifications, snippet_processing_strategy,
                         train_embeddings='embedding_training' in embedding_training_checklist)
             if param_search:
                 self.params["max_evals"] = bayesian_iterations
-                self.params = {**self.params, **{'topic_model_name': topic_model_name, 'embedding_model': embedding_model, 'top_n_topic_words': top_n_topic_words_value, 'is_topic_model_training': is_topic_model_training}}
+                self.params = {**self.params, **{'topic_model_name': topic_model_name, 'embedding_model': embedding_model, 'top_n_topic_words': top_n_topic_words_value, 'is_topic_model_trained': is_topic_model_trained}}
                 hdbscan_umap_params, bayesian_search_results = self.run_bayesian_search(
                         df_training,
                         df_inference,
-                        is_topic_model_training, 
+                        is_topic_model_trained, 
                         min_cluster_size_range, 
                         min_samples_range, 
                         n_components_range, 
@@ -636,8 +541,8 @@ class TopicModelingApp:
                 hyperparameters_display_list = [html.Div("Trials:"), html.Br()]
                 for epoch, result in enumerate(bayesian_search_results):
                     space, loss, label_count = result
-                    hyperparameters_display_list += [html.Div(f"Epoch {epoch+1}: loss {loss:.2f}, label count {label_count} for {ChatIntents.get_hyperparameter_string(space)}"), html.Br()]
-                hyperparameters_display_list += [html.Div(f"Best hyperparameters {ChatIntents.get_hyperparameter_string(hdbscan_umap_params)}"), html.Br()]
+                    hyperparameters_display_list += [html.Div(f"Epoch {epoch+1}: loss {loss:.2f}, label count {label_count} for {ParameterOptimizer.get_hyperparameter_string(space)}"), html.Br()]
+                hyperparameters_display_list += [html.Div(f"Best hyperparameters {ParameterOptimizer.get_hyperparameter_string(hdbscan_umap_params)}"), html.Br()]
             else:
                 hdbscan_umap_params = {
                     "min_cluster_size": min_cluster_size_value,
@@ -647,16 +552,28 @@ class TopicModelingApp:
                     "top_n_topic_words": top_n_topic_words_value
                     }
                 hyperparameters_display_list = [
-                    html.Div(f"Hyperparameters: {ChatIntents.get_hyperparameter_string(hdbscan_umap_params)}"), 
+                    html.Div(f"Hyperparameters: {ParameterOptimizer.get_hyperparameter_string(hdbscan_umap_params)}"), 
                     html.Br()
                     ]
 
             if first_run_flag:
                 self.params = {**self.params, **hdbscan_umap_params}
-                topic_model = self.create_and_train_topic_model(embedding_model, topic_model, topic_model_name, df_training, df_inference, reduce_outliers, is_topic_model_training)
+                topic_model = MyBERTopic.create_and_train(
+                    self.params, 
+                    embedding_model, 
+                    topic_model_name, 
+                    df_training, 
+                    df_inference, 
+                    reduce_outliers, 
+                    is_topic_model_trained, 
+                    DEFAULT_TOPIC_MODEL, 
+                    f'{self.output_dir}/{TOPIC_MODEL_DIR}/{topic_model_name}'
+                    )
                 first_run_flag = False
             elif reduce_outliers:
                 topic_model.reduce_outliers_and_update()
+                topic_model.remove_topic_ids_from_topic_labels()
+                topic_model.update_topics()
 
             fig = topic_model.reduce_dim_and_visualize_documents()
             topic_model.update_topics()
@@ -666,7 +583,27 @@ class TopicModelingApp:
         else:
             raise dash.exceptions.PreventUpdate
 
-    def show_cluster_dialog(self, cluster_managment_n_clicks, is_open: bool, add_new_cluster_n_clicks, snippets_modal_add_new_cluster_n_clicks, recalculate_cluster_info_n_clicks):
+    def show_cluster_dialog_callback(self, cluster_management_n_clicks: int, is_open: bool, 
+        add_new_cluster_n_clicks: int, snippets_modal_add_new_cluster_n_clicks: int, 
+        recalculate_cluster_info_n_clicks: int) -> Tuple[bool, List[html.Div], bool, str]:
+        '''
+        Manages the cluster dialog display and updates based on user interactions.
+        It updates the topic sizes, adds a new cluster, recalculates the cluster info, and creates a list of topic details.
+
+        Parameters:
+        - cluster_management_n_clicks: int - Number of clicks on the cluster management button (Input).
+        - is_open: bool - Indicates if the snippets modal is open (Input).
+        - add_new_cluster_n_clicks: int - Number of clicks on the add new cluster button (Input).
+        - snippets_modal_add_new_cluster_n_clicks: int - Number of clicks on the add new cluster button within the snippets modal (Input).
+        - recalculate_cluster_info_n_clicks: int - Number of clicks on the recalculate cluster info button (Input).
+
+        Returns:
+        - Tuple[bool, List[html.Div], bool, str]: A tuple containing:
+            - A boolean indicating if the cluster dialog should be open.
+            - A list of HTML Div elements representing the topic details.
+            - A boolean indicating if the confirmation dialog should be displayed.
+            - A string message for the confirmation dialog.
+        '''
         topic_model = self.cache.get('topic_model')
 
         topic_model.recalculate_topic_sizes()
@@ -685,7 +622,7 @@ class TopicModelingApp:
         topic_details = []
         topic_info_df = topic_model.get_topic_info()
 
-        for _, row in topic_info_df.iterrows():
+        for i, row in topic_info_df.iterrows():
                 topic_id = row["Topic"]
                 topic_size = topic_model.topic_sizes_[topic_id]
                 if topic_size > 0:
@@ -728,8 +665,21 @@ class TopicModelingApp:
         self.cache.set('topic_model', topic_model)
         return True, topic_details, is_confirmation_displayed, f'New topic {new_topic_label} was just added.'
 
-    def update_cluster_names(self, topic_names: Sequence[str], topic_ids):
-        topic_model = self.cache.get('topic_model')
+    def update_cluster_names_callback(self, topic_names: Sequence[str], topic_ids: Sequence[Dict]) -> Dict[str, str]:
+        '''
+        Updates the stored cluster names when any cluster name is changed.
+
+        Parameters:
+        - topic_names: Sequence[str] - Sequence of topic names entered by the user (Input).
+        - topic_ids: Sequence[Dict] - Sequence of topic IDs (State).
+
+        Returns:
+        - dict[str, str]: Dummy output containing a dictionary with the style information for the dropdown.
+        '''
+        try:
+            topic_model = self.cache.get('topic_model')
+        except:
+            topic_model = None
 
         if ctx.triggered_id and 'index' in ctx.triggered_id:
             triggered_topic_id = ctx.triggered_id.get('index')
@@ -751,11 +701,40 @@ class TopicModelingApp:
         self.cache.set('topic_model', topic_model)
         return {'display': 'block'}
 
-    def handle_selected_snippets(self, selected_snippets):
+    def handle_selected_snippets_callback(self, selected_snippets: Sequence[str]) -> Dict[str, str]:
+        '''
+        Updates the cache when snippets are selected in a cluster dialog.
+
+        Parameters:
+        - selected_snippets: dict - A dictionary containing selected snippets (Input).
+
+        Returns:
+        - dict[str, str]: Dummy output containing a dictionary with the style information for the dropdown.
+        '''
         self.cache.set("selected_snippets", selected_snippets)
         return {'display': 'block'}
 
-    def show_cluster_dialog_content(self, btn_show_clicks, search_term, is_open: bool, btn_remove_clicks, btn_select_all_clicks, current_topic_id):
+    def show_cluster_dialog_content_callback(self, btn_show_clicks: Sequence[int], search_term: str, is_open: bool, btn_remove_clicks: int,
+                                    btn_select_all_clicks: int, current_topic_id: int) -> Tuple[bool, dbc.Checklist, List[dict[str, str]], str, int]:
+        '''
+        Shows the cluster dialog content based on user interactions.
+
+        Parameters:
+        - btn_show_clicks: Sequence[int] - Sequence of clicks on the show snippets button (Input).
+        - search_term: str - Search term entered by the user (Input).
+        - is_open: bool - Indicates if the snippets modal is open (Input).
+        - btn_remove_clicks: int - Number of clicks on the remove cluster button (Input).
+        - btn_select_all_clicks: int - Number of clicks on the select all button (Input).
+        - current_topic_id: int - Current topic ID (State).
+
+        Returns:
+        - Tuple[bool, dbc.Checklist, List[dict[str, str]], str, int]: A tuple containing:
+            - A boolean indicating if the cluster dialog should be open.
+            - A checklist of snippets.
+            - A list of cluster available in the assignment dropdown.
+            - A string indicating the title of the snippets modal.
+            - An integer indicating the current topic ID.
+        '''
         topic_model = self.cache.get('topic_model')
         selected_snippets = self.cache.get("selected_snippets")
 
@@ -799,8 +778,21 @@ class TopicModelingApp:
 
         return is_open, checklist, [{'label': cluster_name, 'value': cluster_id} for cluster_id, cluster_name in topic_labels_excluding_current.items()], f"Snippets for Cluster {current_topic_id}" if current_topic_id != -1 else "Outliers", current_topic_id
 
-    def handle_assign_snippets(self, assign_clicks, selected_snippets, selected_topic, current_topic_id) -> Tuple[Sequence[str], Sequence[Dict[str, str]]]:
-    # Callback to handle moving snippets to a different cluster
+    def handle_assign_snippets_callback(self, assign_clicks: int, selected_snippets: Sequence[str], selected_topic: str, current_topic_id: int) -> Tuple[Sequence[str], Sequence[Dict[str, int]]]:
+        '''
+        Handles moving snippets to a different cluster.
+
+        Parameters:
+        - assign_clicks: int - Number of clicks on the assign button (Input).
+        - selected_snippets: Sequence[str] - Sequence of selected snippets (Input).
+        - selected_topic: str - Selected topic (Input).
+        - current_topic_id: int - Current topic ID (State).
+
+        Returns:
+        - Tuple[Sequence[str], Sequence[Dict[str, int]]]: A tuple containing:
+            - A sequence of snippets assigned to the cluster.
+            - A sequence of snippets together with their numerical id.
+        '''
         topic_model = self.cache.get('topic_model')
 
         if not assign_clicks or not selected_snippets:
@@ -819,14 +811,35 @@ class TopicModelingApp:
         else:
             raise dash.exceptions.PreventUpdate
 
-    def toggle_modal(self, n_clicks: int, is_open: bool) -> bool:
-        if n_clicks or is_open:
+    def toggle_modal_callback(self, upload_clicks: int, is_open: bool) -> bool:
+        '''
+        Toggles the upload modal.
+
+        Parameters:
+        - upload_clicks: int - Number of clicks on the upload button (Input).
+        - is_open: bool - Indicates if the modal is open (Input).
+
+        Returns:
+        - bool: A boolean indicating if the modal should be open.
+        '''
+        if upload_clicks:
             return not is_open
         return is_open
 
-    def handle_file_selection(self, filename, contents):
+    def handle_file_selection_callback(self, filename: str, contents: str) -> Tuple[str, List[Dict[str, str]], Dict[str, str]]:
         '''
-        Load one of the data formats: csv, tsv or json as a datframe and extract the classification labels to populate the dropdown
+        Loads one of the data formats: csv, tsv or json as a dataframe with snippets 
+        and extracts the classification labels to populate the dropdown.
+
+        Parameters:
+        - filename: str - Name of the file selected (Input).
+        - contents: str - Contents of the file selected (Input).
+
+        Returns:
+        - Tuple[str, List[Dict[str, str]], Dict[str, str]]: A tuple containing:
+            - A string indicating the selected file or an error.
+            - A list of classification labels.
+            - A dictionary containing the style information for the embedding model dropdown.
         '''
         if contents is None:
             return "No file selected.", [], {'display': 'block'}
@@ -845,6 +858,9 @@ class TopicModelingApp:
                 df = load_data(io.StringIO(decoded.decode('utf-8')), format='json')
             else:
                 return 'Please upload a .csv, .tsv or .json file.', [], {'display': 'block'}
+
+            # Any empty value for classification is replaced with string 'NONE'
+            df[f'classification'] = df['classification'].apply(lambda x: 'NONE' if pd.isnull(x) else x)
 
             # remove all rows whose snippet or replace is not string
             df = df[df['snippet'].apply(lambda x: isinstance(x, str))]
@@ -867,23 +883,75 @@ class TopicModelingApp:
             print(e)
             return f'There was an error processing this file.\n{e}', [], {'display': 'block'}
 
-    def update_topic_model_training(self, selected_options, topic_model_value):
+    def update_topic_model_training_callback(self, selected_options: Sequence[str], topic_model_value: str) -> Sequence[str]:
+        '''
+        Updates the topic model training checklist based on the selected options.
+        By default the the model training is on as topic_model_training is selected.
+
+        Parameters:
+        - selected_options: Sequence[str] - Selected options (Input).
+        - topic_model_value: str - Selected topic model (Input).
+
+        Returns:
+        - Sequence[str]: A sequence of selected options.
+        '''
         if selected_options or topic_model_value == DEFAULT_TOPIC_MODEL:
             return ['topic_model_training']
         else:
-            return dash.no_update
+            raise dash.exceptions.PreventUpdate
+    
+    def select_all_classification_labels_callback(self, n_clicks: int, options: List[Dict[str, str]]) -> List[str]:
+        '''
+        Selects all labels in the classification label dropdown.
 
-    def select_all_labels(self, n_clicks: int, options):
-        if n_clicks > 0:
+        Parameters:
+        - n_clicks: int - Number of clicks on the select all labels button (Input).
+        - options: List[Dict[str, str]] - List of classification labels (State).
+
+        Returns:
+        - List[str]: A list of selected labels.
+        '''
+        if n_clicks:
             return [option['value'] for option in options]
         return []
 
-    def handle_saving_modal(self, save_file_clicks, save_embedding_model_clicks, save_topic_model_clicks,
-                            confirm_clicks, cancel_clicks, filename, embeddings_checklist_value, last_opened_save_modal, snippet_processing_strategy):
+    def handle_saving_modal_callback(self, save_file_clicks: int, save_embedding_model_clicks: int, save_topic_model_clicks: int,
+                                    confirm_clicks: int, cancel_clicks: int, filename: str, embeddings_checklist_value: List[str],
+                                    last_opened_save_modal: str, snippet_processing_strategy: str) -> Tuple[Dict[str, str], Dict[str, str], str]:
+        '''
+        Handles the saving modal for the embeddings and topic model.
 
+        Parameters:
+        - save_file_clicks: int - Number of clicks on the save file button (Input).
+        - save_embedding_model_clicks: int - Number of clicks on the save embedding model button (Input).
+        - save_topic_model_clicks: int - Number of clicks on the save topic model button (Input).
+        - confirm_clicks: int - Number of clicks on the confirm button (Input).
+        - cancel_clicks: int - Number of clicks on the cancel button (Input).
+        - filename: str - Name of the file to save (State).
+        - embeddings_checklist_value: List[str] - Selected options for saving embeddings (State).
+        - last_opened_save_modal: str - Last opened save modal (State).
+        - snippet_processing_strategy: str - Strategy for processing snippets (State).
+
+        Returns:
+        - Tuple[Dict[str, str], Dict[str, str], str]: A tuple containing:
+            - A dictionary containing the style information for the filename modal.
+            - A dictionary containing the style information for the embeddings checklist.
+            - A string indicating the last opened save modal (between the topic and embedding one).
+        '''
         embedding_checklist_style = {'display': 'block'} if last_opened_save_modal == 'save-file-btn' else {
             'display': 'none'}
         ctx = dash.callback_context
+
+        print('save_file_clicks', save_file_clicks)
+        print('save_embedding_model_clicks', save_embedding_model_clicks)
+        print('save_topic_model_clicks', save_topic_model_clicks)
+        print('confirm_clicks', confirm_clicks)
+        print('cancel_clicks', cancel_clicks)
+        print('filename', filename)
+        print('embeddings_checklist_value', embeddings_checklist_value)
+        print('last_opened_save_modal', last_opened_save_modal)
+        print('snippet_processing_strategy', snippet_processing_strategy)
+
 
         if ctx.triggered:
             triggered_id = ctx.triggered[0]['prop_id'].split('.')[0]
@@ -904,26 +972,22 @@ class TopicModelingApp:
 
         return {'display': 'none'}, {'display': 'none'}, last_opened_save_modal
 
-    # TODO move to training class
-    def train_classification_model(self, pre_trained_model, df, classifications):
-        '''
-        Train the sentence embedding model using classification labels as classes to create triplets for training
-        '''
-        training_datasets = [df]
-        classification_lists = [classifications]
-        test_evaluator, model = train(
-            training_datasets, classification_lists, self.params, pre_trained_model)
-        # print('Score', model.evaluate(test_evaluator))
 
-        # frozen_model = load_model() if not params["INITIALIZED_MODEL"] else load_model(
-        #     model=params["INITIALIZED_MODEL"])
-        # print('Baseline', frozen_model.evaluate(test_evaluator))
-        return model
-
-    # TODO move part of it
-    def get_data(self, selected_labels: Sequence[str], classifications, snippet_processing_strategy, train_embeddings: bool=False):
+    def split_and_encode_data(self, selected_labels: Sequence[str], classifications: Dict[str, int],
+                            snippet_processing_strategy: str, train_embeddings: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame]:
         '''
-        Modify the snipptes according to the selected processing strategy, train the sentence embedding model if needed, encode the snippets, and split into inference and training sets
+        Modify the snipptes according to the selected processing strategy, 
+        train the sentence embedding model if needed, encode the snippets, 
+        and split into inference and training sets
+
+        Parameters:
+        - selected_labels (Sequence[str]): Selected classification labels.
+        - classifications (Dict[str, int]): Dictionary of classification labels to their index.
+        - snippet_processing_strategy (str): Strategy for processing snippets (remove_named_entity_tags or replace_hashtag_in_named_entities).
+        - train_embeddings (bool): Whether to train the embeddings.
+
+        Returns:
+        - Tuple[pd.DataFrame, pd.DataFrame]: Dataframes for training and inference.
         '''
         df = self.cache.get('df')
         embedding_model = self.cache.get('embedding_model')
@@ -948,8 +1012,8 @@ class TopicModelingApp:
             if train_embeddings:
                 tic = time.time()
                 print("Training sentence embeddings...")
-                embedding_model = self.train_classification_model(
-                    embedding_model, df_training, classifications)
+                trainer = MyTrainer([df_training], [classifications], embedding_model, self.params["epochs"], self.params["batch_size"], unfreeze_layers = self.params["unfreeze_layers"], snippet_column_name=self.params['snippet_column_name'] if 'snippet_column_name' in self.params else 'snippet')
+                embedding_model = trainer.fit()
                 self.cache.set('embedding_model', embedding_model)
                 print("Training sentence embeddings:", time.time()-tic)
 
@@ -975,65 +1039,64 @@ class TopicModelingApp:
         df_training = df[~df['top_classification'].isin(selected_labels)]
         df_inference = df[df['top_classification'].isin(
             selected_labels)]
-        print('Sample of the snippet encoding format',
-            df_training["embedding_input"].to_list()[:2])
+        print('Sample of the snippet encoding format', df_training["embedding_input"].to_list()[:2])
         self.cache.set('df', df)
         return df_training, df_inference
 
-    def run_bayesian_search(self, df_training, df_inference, is_topic_model_training: bool, min_cluster_size_range, min_samples_range, n_components_range, n_neighbors_range):
+    def run_bayesian_search(self, df_training: pd.DataFrame, df_inference: pd.DataFrame, is_topic_model_trained: bool, 
+                            min_cluster_size_range: Sequence[int], min_samples_range: Sequence[int], n_components_range: Sequence[int],
+                            n_neighbors_range: Sequence[int]) -> Tuple[Dict[str, Any], List[Tuple[Dict[str, Any], float, int]]]:
         '''
-        Run the Bayesian search for the best hyperparameters
+        Run the Bayesian search to obtain best hyperparameters.
+
+        Parameters:
+        - df_training (pd.DataFrame): Dataframe for training.
+        - df_inference (pd.DataFrame): Dataframe for inference.
+        - is_topic_model_trained (bool): Whether the topic model is trained.
+        - min_cluster_size_range (Sequence[int]): Range of minimum cluster size for Bayesian search.
+        - min_samples_range (Sequence[int]): Range of minimum samples for Bayesian search.
+        - n_components_range (Sequence[int]): Range of components for Bayesian search.
+        - n_neighbors_range (Sequence[int]): Range of n neighbors for Bayesian search.
+
+        Returns:
+        - Tuple[Dict[str, Any], List[Tuple[Dict[str, Any], float, int]]]: A tuple containing:
+            - A dictionary of the best hyperparameters.
+            - A list of tuples containing the hyperparameters, loss, and label count.
         '''
         hspace = {
             "n_neighbors": hp.choice('n_neighbors', n_neighbors_range),
             "n_components": hp.choice('n_components', n_components_range),
             "min_cluster_size": hp.choice('min_cluster_size', min_cluster_size_range),
             "min_samples": hp.choice('min_samples', min_samples_range),
-            "is_topic_model_training": is_topic_model_training,
+            "is_topic_model_trained": is_topic_model_trained,
             "random_state": 42
         }
         label_lower = 28
         label_upper = 50
-        chat_intents_model = ChatIntents(df_training, df_inference)
-        best_params, best_clusters, trials = chat_intents_model.bayesian_search(space=hspace,
+        parameter_optimizer = ParameterOptimizer(df_training, df_inference)
+        best_params, best_clusters, trials = parameter_optimizer.bayesian_search(space=hspace,
                                                                                 label_lower=label_lower,
                                                                                 label_upper=label_upper,
                                                                                 params=self.params)
-        return best_params, chat_intents_model.bayesian_search_results
+        return best_params, parameter_optimizer.bayesian_search_results
 
-    # TODO move this to topic model
-    def create_and_train_topic_model(self, embedding_model, topic_model, topic_model_name: str, df_training, df_inference, reduce_outliers, is_topic_model_training: bool):
+    def retrieve_all_model_options(self, dir: str) -> List[Dict[str, str]]:
         '''
-        Create a new topic model or load an existing one and train it
-        '''
-        if not topic_model_name or topic_model_name.strip() == DEFAULT_TOPIC_MODEL: # if no model selected
-            topic_model = GlanosBERTopic(self.params, df_training, df_inference, topic_model_name, embedding_model)
-        else:
-            topic_model = GlanosBERTopic.load(f'{OUTPUT_DIR}/{TOPIC_MODEL_DIR}/{topic_model_name}')
-            topic_model.df_training = df_training
-            topic_model.df_inference = df_inference
-            topic_model.topic_model_name = topic_model_name
+        Retrieve all the models in the specified directory
 
-        topic_model.train(is_topic_model_training)
+        Parameters:
+        - dir (str): Directory to retrieve models from.
 
-        if reduce_outliers:
-            topic_model.reduce_outliers_and_update()
-        topic_model.remove_topic_ids_from_topic_labels()
-        topic_model.update_topics()
-
-        return topic_model
-
-    def get_all_model_options(self, dir):
-        '''
-        Get all the models in the specified directory
+        Returns:
+        - List[Dict[str, str]]: List of dictionaries containing the model options.
         '''
         if dir == EMBEDDING_MODEL_DIR:
             subdir_list = [subdir for subdir in os.listdir(
-                f'{OUTPUT_DIR}/{dir}/') if "." not in subdir]
+                f'{self.output_dir}/{dir}/') if "." not in subdir]
             file_list = []
             for subdir in subdir_list:
                 file_list += [f'{subdir}/{file}' for file in os.listdir(
-                    f'{OUTPUT_DIR}/{dir}/{subdir}') if not file.startswith(".")]
+                    f'{self.output_dir}/{dir}/{subdir}') if not file.startswith(".")]
 
             pretrained_embedding_models = [
                 {'label': f'{REPLACE_HASHTAG_IN_NAMED_ENTITIES_DIR}/{DEFAULT_EMBEDDING_MODEL}',
@@ -1043,26 +1106,30 @@ class TopicModelingApp:
             return [{'label': file, 'value': file} for file in file_list] + pretrained_embedding_models
         elif dir == TOPIC_MODEL_DIR:
             file_list = [file for file in os.listdir(
-                f'{OUTPUT_DIR}/{dir}') if not file.startswith(".")]
+                f'{self.output_dir}/{dir}') if not file.startswith(".")]
             pretrained_topic_models = [
                 {'label': DEFAULT_TOPIC_MODEL, 'value': DEFAULT_TOPIC_MODEL}]
             return [{'label': file, 'value': file} for file in file_list] + pretrained_topic_models
         else:
             return []
 
-    def save_state(self, app_layout, figure, to_cache: bool=True) -> None:
+    def save_state(self, app_layout: List, figure: Dict) -> None:
         '''
-        Save the current state of the app to the cache. Currently not necessary since the state gets updated with every change
+        Save the current state of the app to the cache. 
+
+        Parameters:
+        - app_layout (list): Layout of the application.
+        - figure (dict): Current state of the figure.
         '''
-        def set_figure_at_id(d, target_id, fig) -> None:
-            """
+        def set_figure_at_id(d: Dict, target_id: str, fig: Dict) -> None:
+            '''
             Recursively set the 'figure' property at the specified 'id' in a nested dictionary.
 
             Parameters:
             - d: The input dictionary
             - target_id: The 'id' at which to set the 'figure'
             - fig: The value to set for the 'figure' property
-            """
+            '''
             if isinstance(d, dict):
                 if 'id' in d and d['id'] == target_id:
                     d['figure'] = fig
@@ -1074,14 +1141,19 @@ class TopicModelingApp:
                     set_figure_at_id(item, target_id, fig)
 
         set_figure_at_id(app_layout, 'controls-and-graph', figure)
-        if to_cache:
-            self.cache.set('app_layout', app_layout)
-        else:
-            with open('file.pkl', 'wb') as file:
-                pickle.dump(app_layout, file) 
+        self.cache.set('app_layout', app_layout)
         print("State saved.")
 
-    def save_output(self, filename, is_embedding_included: bool, last_opened_save_modal, snippet_processing_strategy) -> None:
+    def save_output(self, filename, is_embedding_included: bool, last_opened_save_modal: str, snippet_processing_strategy: str) -> None:
+        '''
+        Save the model to a file for the topic model, embedding model, 
+        or save the snippets with new classifications to a file.
+
+        Parameters:
+        - filename (str): Name of the file to save.
+        - is_embedding_included (bool): Whether the embedding should be included.
+        - last_opened_save_modal (str): Last opened save modal (can be save-file-btn, save-embedding-model-btn, or save-topic-model-btn).        
+        '''
         topic_model = self.cache.get('topic_model')
         embedding_model = self.cache.get('embedding_model')
 
@@ -1111,7 +1183,7 @@ class TopicModelingApp:
             entire_df["classification"] = entire_df["new_classification"]
             entire_df = entire_df.drop(
                 columns=['embedding_input', 'new_classification', 'top_classification'])
-            entire_df.to_csv(f'{OUTPUT_DIR}/{DATA_DIR}/{filename}.tsv', sep='\t', index=False)
+            entire_df.to_csv(f'{self.output_dir}/{DATA_DIR}/{filename}.tsv', sep='\t', index=False)
 
         # Save embedding model
         elif last_opened_save_modal == 'save-embedding-model-btn':
@@ -1120,11 +1192,11 @@ class TopicModelingApp:
             elif snippet_processing_strategy == 'remove_named_entity_tags':
                 filename = f'{REMOVE_NAMED_ENTITY_TAGS}/{filename}'
             embedding_model.save(
-                f'{OUTPUT_DIR}/{EMBEDDING_MODEL_DIR}/{filename}')
+                f'{self.output_dir}/{EMBEDDING_MODEL_DIR}/{filename}')
 
         # Save topic model
         elif last_opened_save_modal == 'save-topic-model-btn':
-            topic_model.save(f'{OUTPUT_DIR}/{TOPIC_MODEL_DIR}/{filename}')
+            topic_model.save(f'{self.output_dir}/{TOPIC_MODEL_DIR}/{filename}')
         self.cache.set('topic_model', topic_model)
 
 
@@ -1132,3 +1204,4 @@ if __name__ == '__main__':
 
     app = TopicModelingApp()
     app.run()
+
